@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "nodemon index.js",
     "start": "node index.js",
-    "start:bun": "bun index.js"
+    "start:bun": "bun index.js",
+    "build": "echo \"No build step required\"",
   },
   "dependencies": {
     "cookie-parser": "^1.4.6",
