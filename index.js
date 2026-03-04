@@ -2,6 +2,8 @@ require('dotenv').config();
 const express = require('express');
 const app = express();
 
+app.set('trust proxy', 1);
+
 const { connect } = require('./startup/db');
 require('./startup/routes')(app);
 
