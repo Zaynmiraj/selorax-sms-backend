@@ -20,15 +20,16 @@ const STATUS_TO_EVENT_TOPIC = {
 
 /**
  * Verify HMAC-SHA256 webhook signature.
- * The platform signs the JSON body with the subscription's signing_secret.
+ * The platform signs "timestamp.body" with the subscription's signing_secret.
  * Header format: "sha256=<hex digest>"
  */
-function verifySignature(body, signatureHeader, secret) {
+function verifySignature(body, signatureHeader, timestamp, secret) {
     if (!signatureHeader || !secret) return false;
 
+    const signaturePayload = timestamp ? `${timestamp}.${body}` : body;
     const expected = 'sha256=' + crypto
         .createHmac('sha256', secret)
-        .update(body)
+        .update(signaturePayload)
         .digest('hex');
 
     try {
@@ -47,18 +48,19 @@ function verifySignature(body, signatureHeader, secret) {
  * Verifies HMAC-SHA256 signature, maps order status to template, sends SMS.
  */
 Router.post('/receive', asyncMiddleware(async (req, res) => {
-    const signature = req.header('X-SeloraX-Webhook-Signature');
+    const signature = req.header('X-SeloraX-Signature');
     const eventTopic = req.header('X-SeloraX-Webhook-Event');
+    const timestamp = req.header('X-SeloraX-Timestamp');
 
     if (!signature || !eventTopic) {
         return res.status(400).send({ message: 'Missing webhook headers.', status: 400 });
     }
 
-    // Verify HMAC signature
+    // Verify HMAC signature (platform signs "timestamp.body")
     const rawBody = JSON.stringify(req.body);
     const signingSecret = process.env.WEBHOOK_SIGNING_SECRET;
 
-    if (!verifySignature(rawBody, signature, signingSecret)) {
+    if (!verifySignature(rawBody, signature, timestamp, signingSecret)) {
         console.warn('[Webhook] Invalid signature for event:', eventTopic);
         return res.status(401).send({ message: 'Invalid webhook signature.', status: 401 });
     }
