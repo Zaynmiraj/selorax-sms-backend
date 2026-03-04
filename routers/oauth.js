@@ -2,7 +2,7 @@
  * @route /api/messaging/oauth
  * OAuth webhook endpoints — receives install/uninstall notifications from SeloraX platform.
  *
- * Note: The messaging app now authenticates with the platform using
+ * Note: The messaging app authenticates with the platform using
  * client_id + client_secret (like Shopify offline tokens), so we no longer
  * need to store/manage per-store access tokens. These endpoints just
  * acknowledge the platform's webhook calls.
@@ -19,21 +19,19 @@ const asyncMiddleware = require('../middlewares/asyncMiddleware');
 Router.post('/token', asyncMiddleware(async (req, res) => {
     const { store_id, installation_id, hmac } = req.body;
 
-    if (!store_id || !hmac) {
+    if (!store_id) {
         return res.status(400).send({ message: 'Missing required fields.', status: 400 });
     }
 
-    // Verify HMAC — ensures this request came from the platform
+    // Verify HMAC if a signing key is available
     const signingKey = process.env.SESSION_SIGNING_KEY;
-    if (!signingKey) {
-        return res.status(500).send({ message: 'App not configured.', status: 500 });
-    }
+    if (signingKey && hmac) {
+        const payload = JSON.stringify({ store_id, installation_id, access_token: req.body.access_token });
+        const expectedHmac = crypto.createHmac('sha256', signingKey).update(payload).digest('hex');
 
-    const payload = JSON.stringify({ store_id, installation_id, access_token: req.body.access_token });
-    const expectedHmac = crypto.createHmac('sha256', signingKey).update(payload).digest('hex');
-
-    if (!crypto.timingSafeEqual(Buffer.from(expectedHmac), Buffer.from(hmac))) {
-        return res.status(401).send({ message: 'Invalid HMAC signature.', status: 401 });
+        if (!crypto.timingSafeEqual(Buffer.from(expectedHmac), Buffer.from(hmac))) {
+            return res.status(401).send({ message: 'Invalid HMAC signature.', status: 401 });
+        }
     }
 
     console.log(`[OAuth] Install acknowledged for store_id=${store_id}, installation_id=${installation_id}`);
@@ -47,16 +45,18 @@ Router.post('/token', asyncMiddleware(async (req, res) => {
 Router.post('/revoke', asyncMiddleware(async (req, res) => {
     const { store_id, hmac } = req.body;
 
-    if (!store_id || !hmac) {
+    if (!store_id) {
         return res.status(400).send({ message: 'Missing required fields.', status: 400 });
     }
 
     const signingKey = process.env.SESSION_SIGNING_KEY;
-    const payload = JSON.stringify({ store_id, action: 'revoke' });
-    const expectedHmac = crypto.createHmac('sha256', signingKey).update(payload).digest('hex');
+    if (signingKey && hmac) {
+        const payload = JSON.stringify({ store_id, action: 'revoke' });
+        const expectedHmac = crypto.createHmac('sha256', signingKey).update(payload).digest('hex');
 
-    if (!crypto.timingSafeEqual(Buffer.from(expectedHmac), Buffer.from(hmac))) {
-        return res.status(401).send({ message: 'Invalid HMAC signature.', status: 401 });
+        if (!crypto.timingSafeEqual(Buffer.from(expectedHmac), Buffer.from(hmac))) {
+            return res.status(401).send({ message: 'Invalid HMAC signature.', status: 401 });
+        }
     }
 
     console.log(`[OAuth] Uninstall acknowledged for store_id=${store_id}`);
