@@ -38,6 +38,9 @@ Router.post('/token', asyncMiddleware(async (req, res) => {
     res.send({ message: 'Installation acknowledged.', status: 200 });
 }));
 
+
+
+
 /**
  * POST /api/messaging/oauth/revoke
  * Called by the platform when the app is uninstalled.
