@@ -3,6 +3,8 @@ const express = require('express');
 const Router = express.Router();
 const asyncMiddleware = require('../middlewares/asyncMiddleware');
 const messaging = require('../models/messaging');
+const { connection } = require('../startup/db');
+const scheduler = require('../services/scheduler');
 
 /**
  * Map platform order_status values to messaging template event topics.
@@ -56,8 +58,8 @@ Router.post('/receive', asyncMiddleware(async (req, res) => {
         return res.status(400).send({ message: 'Missing webhook headers.', status: 400 });
     }
 
-    // Verify HMAC signature (platform signs "timestamp.body")
-    const rawBody = JSON.stringify(req.body);
+    // Verify HMAC signature (platform signs "timestamp.rawBody")
+    const rawBody = req.rawBody ? req.rawBody.toString('utf8') : JSON.stringify(req.body);
     const signingSecret = process.env.WEBHOOK_SIGNING_SECRET;
 
     if (!verifySignature(rawBody, signature, timestamp, signingSecret)) {
@@ -106,10 +108,32 @@ Router.post('/receive', asyncMiddleware(async (req, res) => {
     }
 
     // Extract customer phone from order data
-    const phone = order.customer_phone || order.phone || order.shipping_phone;
+    const rawPhone = order.customer_phone || order.phone || order.shipping_phone;
 
-    if (!phone) {
+    if (!rawPhone) {
         return res.status(200).send({ message: 'No customer phone found in payload.', status: 200 });
+    }
+
+    // Normalize and validate BD phone number
+    const phone = rawPhone.toString().replace(/[\s\-()]+/g, '');
+    const bdPhoneRegex = /^(?:\+?880|0)1[3-9]\d{8}$/;
+    if (!bdPhoneRegex.test(phone)) {
+        console.warn(`[Webhook] Invalid phone number: ${rawPhone} for store ${store_id}`);
+        return res.status(200).send({ message: `Invalid phone number: ${rawPhone}`, status: 200 });
+    }
+
+    // Duplicate prevention — skip if same SMS was already sent for this order+event in the last 5 min
+    const orderId = order.order_id || order.id;
+    const [dupeRows] = await connection.promise().query(/*sql*/`
+        SELECT log_id FROM app_messaging_logs
+        WHERE store_id = ? AND event_topic = ? AND resource_id = ? AND status = 'sent'
+          AND created_at > DATE_SUB(NOW(), INTERVAL 5 MINUTE)
+        LIMIT 1
+    `, [store_id, templateEventTopic, orderId]);
+
+    if (dupeRows.length > 0) {
+        console.log(`[Webhook] Duplicate skipped: ${templateEventTopic} for order ${orderId} store ${store_id}`);
+        return res.status(200).send({ message: 'Duplicate event — SMS already sent.', status: 200 });
     }
 
     // Render template with order variables
@@ -126,7 +150,27 @@ Router.post('/receive', asyncMiddleware(async (req, res) => {
 
     const renderedMessage = messaging.renderTemplate(template.template_text, variables);
 
-    // Send SMS (checks balance, deducts, logs)
+    // Cancel pending scheduled SMS if order is cancelled
+    if (templateEventTopic === 'order.cancelled' && orderId) {
+        await scheduler.cancelJobsForOrder(store_id, String(orderId));
+    }
+
+    // Check if template has delay
+    if (template.delay_minutes > 0) {
+        const scheduledAt = new Date(Date.now() + template.delay_minutes * 60 * 1000);
+        const jobId = await scheduler.scheduleJob(
+            store_id, settings.installation_id, phone, renderedMessage, scheduledAt,
+            { event_topic: templateEventTopic, resource_id: orderId }
+        );
+        console.log(`[Webhook] ${templateEventTopic} → SMS scheduled (job ${jobId}) for ${scheduledAt.toISOString()} store ${store_id}`);
+        return res.status(200).send({
+            message: 'SMS scheduled.',
+            data: { scheduled: true, job_id: jobId, scheduled_at: scheduledAt },
+            status: 200,
+        });
+    }
+
+    // Send immediately (no delay)
     const result = await messaging.sendSms(
         store_id,
         settings.installation_id,

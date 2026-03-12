@@ -1,7 +1,11 @@
 module.exports = function (err, req, res, next) {
-    console.error('[Messaging] Unhandled error:', err.message);
-    res.status(500).send({
-        message: 'Something went wrong.',
-        status: 500,
+    const statusCode = err.status || 500;
+    console.error(`[Messaging] ${req.method} ${req.originalUrl} — ${statusCode}:`, err.message);
+    if (process.env.NODE_ENV !== 'production') {
+        console.error(err.stack);
+    }
+    res.status(statusCode).send({
+        message: err.expose ? err.message : 'Something went wrong.',
+        status: statusCode,
     });
 };

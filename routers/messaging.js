@@ -40,7 +40,7 @@ Router.get('/templates', auth, asyncMiddleware(async (req, res) => {
  * Create or update a template
  */
 Router.post('/templates', auth, asyncMiddleware(async (req, res) => {
-    const { event_topic, name, template_text, is_active } = req.body;
+    const { event_topic, name, template_text, is_active, delay_minutes } = req.body;
 
     if (!event_topic || !name || !template_text) {
         return res.status(400).send({ message: 'event_topic, name, and template_text are required.', status: 400 });
@@ -49,7 +49,7 @@ Router.post('/templates', auth, asyncMiddleware(async (req, res) => {
     const template = await messaging.upsertTemplate(
         req.installation.installation_id,
         req.user.store_id,
-        { event_topic, name, template_text, is_active }
+        { event_topic, name, template_text, is_active, delay_minutes }
     );
     res.send({ message: 'Template saved.', data: template, status: 200 });
 }));
@@ -79,6 +79,13 @@ Router.post('/send', auth, asyncMiddleware(async (req, res) => {
 
     if (!phone || !message) {
         return res.status(400).send({ message: 'phone and message are required.', status: 400 });
+    }
+
+    // Validate BD phone number format
+    const cleanPhone = phone.toString().replace(/[\s\-()]+/g, '');
+    const bdPhoneRegex = /^(?:\+?880|0)1[3-9]\d{8}$/;
+    if (!bdPhoneRegex.test(cleanPhone)) {
+        return res.status(400).send({ message: 'Invalid phone number format.', status: 400 });
     }
 
     const result = await messaging.sendSms(

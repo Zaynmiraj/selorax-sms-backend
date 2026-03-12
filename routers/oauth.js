@@ -4,13 +4,15 @@
  *
  * Note: The messaging app authenticates with the platform using
  * client_id + client_secret (like Shopify offline tokens), so we no longer
- * need to store/manage per-store access tokens. These endpoints just
- * acknowledge the platform's webhook calls.
+ * need to store/manage per-store access tokens.
  */
 const express = require('express');
 const Router = express.Router();
 const crypto = require('crypto');
 const asyncMiddleware = require('../middlewares/asyncMiddleware');
+const messaging = require('../models/messaging');
+const { connection } = require('../startup/db');
+const scheduler = require('../services/scheduler');
 
 /**
  * POST /api/messaging/oauth/token
@@ -32,6 +34,11 @@ Router.post('/token', asyncMiddleware(async (req, res) => {
         if (!crypto.timingSafeEqual(Buffer.from(expectedHmac), Buffer.from(hmac))) {
             return res.status(401).send({ message: 'Invalid HMAC signature.', status: 401 });
         }
+    }
+
+    // Ensure a settings row exists for the new installation
+    if (installation_id) {
+        await messaging.ensureSettings(store_id, installation_id);
     }
 
     console.log(`[OAuth] Install acknowledged for store_id=${store_id}, installation_id=${installation_id}`);
@@ -62,7 +69,24 @@ Router.post('/revoke', asyncMiddleware(async (req, res) => {
         }
     }
 
-    console.log(`[OAuth] Uninstall acknowledged for store_id=${store_id}`);
+    // Deactivate settings so webhooks stop processing for this store
+    await connection.promise().query(/*sql*/`
+        UPDATE app_messaging_settings
+        SET is_enabled = 0, auto_sms_enabled = 0
+        WHERE store_id = ?
+    `, [store_id]);
+
+    // Deactivate templates
+    await connection.promise().query(/*sql*/`
+        UPDATE app_messaging_templates
+        SET is_active = 0
+        WHERE store_id = ?
+    `, [store_id]);
+
+    // Cancel all pending scheduled SMS
+    await scheduler.cancelAllForStore(store_id);
+
+    console.log(`[OAuth] Uninstall completed for store_id=${store_id} — settings, templates & scheduled jobs deactivated`);
     res.send({ message: 'Uninstall acknowledged.', status: 200 });
 }));
 

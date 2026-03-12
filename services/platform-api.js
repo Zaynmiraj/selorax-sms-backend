@@ -41,6 +41,7 @@ async function apiCall(store_id, method, path, body = null) {
         options.body = JSON.stringify(body);
     }
 
+    options.signal = AbortSignal.timeout(15000); // 15s timeout
     const response = await fetch(url, options);
     const data = await response.json();
 

@@ -82,16 +82,17 @@ async function getTemplatesByStore(store_id) {
 /**
  * Create or update a template
  */
-async function upsertTemplate(installation_id, store_id, { event_topic, name, template_text, is_active }) {
+async function upsertTemplate(installation_id, store_id, { event_topic, name, template_text, is_active, delay_minutes }) {
     await connection.promise().query(/*sql*/`
-        INSERT INTO app_messaging_templates (installation_id, store_id, event_topic, name, template_text, is_active)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO app_messaging_templates (installation_id, store_id, event_topic, name, template_text, is_active, delay_minutes)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE
             name = VALUES(name),
             template_text = VALUES(template_text),
             is_active = VALUES(is_active),
+            delay_minutes = VALUES(delay_minutes),
             updated_at = CURRENT_TIMESTAMP
-    `, [installation_id, store_id, event_topic, name, template_text, is_active ?? 1]);
+    `, [installation_id, store_id, event_topic, name, template_text, is_active ?? 1, delay_minutes ?? 0]);
 
     const [rows] = await connection.promise().query(/*sql*/`
         SELECT * FROM app_messaging_templates
@@ -143,27 +144,44 @@ async function sendSms(store_id, installation_id, phone, message, { event_topic,
     const result = await provider.sendSms(phone, message);
 
     // Log the SMS
-    const [logResult] = await connection.promise().query(/*sql*/`
-        INSERT INTO app_messaging_logs (store_id, installation_id, phone, message, event_topic, resource_id, status, provider_response)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `, [
-        store_id, installation_id, phone, message,
-        event_topic || null, resource_id || null,
-        result.success ? 'sent' : 'failed',
-        JSON.stringify(result.provider_response),
-    ]);
-
-    const sms_log_id = logResult.insertId;
+    let sms_log_id = null;
+    try {
+        const [logResult] = await connection.promise().query(/*sql*/`
+            INSERT INTO app_messaging_logs (store_id, installation_id, phone, message, event_topic, resource_id, status, provider_response)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `, [
+            store_id, installation_id, phone, message,
+            event_topic || null, resource_id || null,
+            result.success ? 'sent' : 'failed',
+            JSON.stringify(result.provider_response),
+        ]);
+        sms_log_id = logResult.insertId;
+    } catch (logErr) {
+        console.error(`[SMS] Log insert failed for store ${store_id}, phone ${phone}:`, logErr.message);
+    }
 
     // Deduct from wallet only if sent successfully
+    let debitSuccess = false;
     if (result.success) {
-        await wallet.deduct(store_id, pricePerSms, `SMS to ${phone}`, sms_log_id);
+        try {
+            await wallet.deduct(store_id, pricePerSms, `SMS to ${phone}`, sms_log_id);
+            debitSuccess = true;
+        } catch (debitErr) {
+            console.error(`[SMS] Wallet debit failed for store ${store_id}, amount ${pricePerSms}:`, debitErr.message);
+            // SMS was sent but debit failed — log for reconciliation
+            try {
+                await connection.promise().query(/*sql*/`
+                    UPDATE app_messaging_logs SET provider_response = JSON_SET(COALESCE(provider_response, '{}'), '$.debit_error', ?)
+                    WHERE log_id = ?
+                `, [debitErr.message, sms_log_id]);
+            } catch { /* non-critical */ }
+        }
     }
 
     return {
         success: result.success,
         log_id: sms_log_id,
-        balance_after: result.success ? (balance - pricePerSms) : balance,
+        balance_after: result.success && debitSuccess ? (balance - pricePerSms) : balance,
         provider_response: result.provider_response,
     };
 }

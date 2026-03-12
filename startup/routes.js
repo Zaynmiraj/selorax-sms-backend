@@ -11,7 +11,10 @@ module.exports = function (app) {
     }));
 
     app.use(cookieParser());
-    app.use(express.json());
+    // Capture raw body for webhook HMAC signature verification
+    app.use(express.json({
+        verify: (req, _res, buf) => { req.rawBody = buf; },
+    }));
     app.use(express.urlencoded({ extended: true }));
 
     const limiter = rateLimit({
@@ -28,6 +31,7 @@ module.exports = function (app) {
     app.use('/api/messaging', require('../routers/messaging'));
     app.use('/api/messaging/wallet', require('../routers/wallet'));
     app.use('/api/messaging/payment', require('../routers/payment'));
+    app.use('/api/messaging/scheduled', require('../routers/scheduled'));
 
     // OAuth token receiver (called by SeloraX platform on install/uninstall)
     app.use('/api/messaging/oauth', require('../routers/oauth'));
