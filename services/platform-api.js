@@ -56,7 +56,17 @@ async function apiCall(store_id, method, path, body = null) {
 }
 
 // Convenience methods
-const get = (store_id, path) => apiCall(store_id, 'GET', path);
+function get(store_id, path, params) {
+    if (params && typeof params === 'object') {
+        const qs = new URLSearchParams();
+        for (const [k, v] of Object.entries(params)) {
+            if (v !== undefined && v !== null && v !== '') qs.append(k, v);
+        }
+        const qsStr = qs.toString();
+        if (qsStr) path = `${path}?${qsStr}`;
+    }
+    return apiCall(store_id, 'GET', path);
+}
 const post = (store_id, path, body) => apiCall(store_id, 'POST', path, body);
 
 module.exports = {

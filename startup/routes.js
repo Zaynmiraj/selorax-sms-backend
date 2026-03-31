@@ -32,6 +32,8 @@ module.exports = function (app) {
     app.use('/api/messaging/wallet', require('../routers/wallet'));
     app.use('/api/messaging/payment', require('../routers/payment'));
     app.use('/api/messaging/scheduled', require('../routers/scheduled'));
+    app.use('/api/messaging/automations', require('../routers/automations'));
+    app.use('/api/messaging/campaigns', require('../routers/campaigns'));
 
     // OAuth token receiver (called by SeloraX platform on install/uninstall)
     app.use('/api/messaging/oauth', require('../routers/oauth'));

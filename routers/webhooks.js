@@ -3,22 +3,9 @@ const express = require('express');
 const Router = express.Router();
 const asyncMiddleware = require('../middlewares/asyncMiddleware');
 const messaging = require('../models/messaging');
+const automations = require('../models/messaging-automations');
 const { connection } = require('../startup/db');
 const scheduler = require('../services/scheduler');
-
-/**
- * Map platform order_status values to messaging template event topics.
- * Platform fires generic `order.status_changed` with a status field.
- * Messaging templates use specific topics like `order.confirmed`.
- */
-const STATUS_TO_EVENT_TOPIC = {
-    processing: 'order.confirmed',   // Admin approves order → "confirmed"
-    shipped: 'order.shipped',        // Courier assigned / shipped
-    completed: 'order.delivered',    // Order completed / delivered
-    delivered: 'order.delivered',
-    cancelled: 'order.cancelled',
-    hold: 'order.cancelled',         // On hold
-};
 
 /**
  * Verify HMAC-SHA256 webhook signature.
@@ -82,29 +69,24 @@ Router.post('/receive', asyncMiddleware(async (req, res) => {
         return res.status(200).send({ message: 'Auto-SMS disabled, skipping.', status: 200 });
     }
 
-    // Resolve the template event topic from the platform event
-    // Platform sends "order.status_changed" — we map payload.status to a specific topic
+    // Resolve event key using automations model
     const order = data || {};
-    let templateEventTopic = eventTopic;
+    const orderStatus = order.status || order.order_status;
+    const eventKey = automations.resolveEventKey(eventTopic, orderStatus);
 
-    if (eventTopic === 'order.status_changed') {
-        const orderStatus = order.status || order.order_status;
-        templateEventTopic = STATUS_TO_EVENT_TOPIC[orderStatus] || null;
-
-        if (!templateEventTopic) {
-            return res.status(200).send({
-                message: `No template mapping for status: ${orderStatus}`,
-                status: 200
-            });
-        }
+    if (!eventKey) {
+        return res.status(200).send({ message: `No automation mapping for event: ${eventTopic}, status: ${orderStatus}`, status: 200 });
     }
 
-    // Find matching template by store_id
-    const templates = await messaging.getTemplatesByStore(store_id);
-    const template = templates.find(t => t.event_topic === templateEventTopic && t.is_active);
+    // Find active automation
+    const automation = await automations.getByEventKey(store_id, eventKey);
+    if (!automation) {
+        return res.status(200).send({ message: 'No active automation for this event.', status: 200 });
+    }
 
-    if (!template) {
-        return res.status(200).send({ message: 'No active template for this event.', status: 200 });
+    // Check delivery mode — if 'off', skip immediately
+    if (automation.delivery_mode === 'off') {
+        return res.status(200).send({ message: 'Automation delivery mode is off, skipping.', status: 200 });
     }
 
     // Extract customer phone from order data
@@ -129,14 +111,14 @@ Router.post('/receive', asyncMiddleware(async (req, res) => {
         WHERE store_id = ? AND event_topic = ? AND resource_id = ? AND status = 'sent'
           AND created_at > DATE_SUB(NOW(), INTERVAL 5 MINUTE)
         LIMIT 1
-    `, [store_id, templateEventTopic, orderId]);
+    `, [store_id, eventKey, orderId]);
 
     if (dupeRows.length > 0) {
-        console.log(`[Webhook] Duplicate skipped: ${templateEventTopic} for order ${orderId} store ${store_id}`);
+        console.log(`[Webhook] Duplicate skipped: ${eventKey} for order ${orderId} store ${store_id}`);
         return res.status(200).send({ message: 'Duplicate event — SMS already sent.', status: 200 });
     }
 
-    // Render template with order variables
+    // Render automation template with order variables
     const variables = {
         order_id: order.order_id || order.id || '',
         order_number: order.order_number || order.order_id || '',
@@ -148,21 +130,21 @@ Router.post('/receive', asyncMiddleware(async (req, res) => {
         store_name: order.store_name || '',
     };
 
-    const renderedMessage = messaging.renderTemplate(template.template_text, variables);
+    const renderedMessage = messaging.renderTemplate(automation.template_text, variables);
 
     // Cancel pending scheduled SMS if order is cancelled
-    if (templateEventTopic === 'order.cancelled' && orderId) {
+    if (eventKey === 'order.cancelled' && orderId) {
         await scheduler.cancelJobsForOrder(store_id, String(orderId));
     }
 
-    // Check if template has delay
-    if (template.delay_minutes > 0) {
-        const scheduledAt = new Date(Date.now() + template.delay_minutes * 60 * 1000);
+    // Check delivery mode — if 'delayed', schedule; if 'instant', send immediately
+    if (automation.delivery_mode === 'delayed' && automation.delay_minutes > 0) {
+        const scheduledAt = new Date(Date.now() + automation.delay_minutes * 60 * 1000);
         const jobId = await scheduler.scheduleJob(
             store_id, settings.installation_id, phone, renderedMessage, scheduledAt,
-            { event_topic: templateEventTopic, resource_id: orderId }
+            { event_topic: eventKey, resource_id: orderId }
         );
-        console.log(`[Webhook] ${templateEventTopic} → SMS scheduled (job ${jobId}) for ${scheduledAt.toISOString()} store ${store_id}`);
+        console.log(`[Webhook] ${eventKey} → SMS scheduled (job ${jobId}) for ${scheduledAt.toISOString()} store ${store_id}`);
         return res.status(200).send({
             message: 'SMS scheduled.',
             data: { scheduled: true, job_id: jobId, scheduled_at: scheduledAt },
@@ -170,16 +152,16 @@ Router.post('/receive', asyncMiddleware(async (req, res) => {
         });
     }
 
-    // Send immediately (no delay)
+    // Send immediately
     const result = await messaging.sendSms(
         store_id,
         settings.installation_id,
         phone,
         renderedMessage,
-        { event_topic: templateEventTopic, resource_id: order.order_id || order.id }
+        { event_topic: eventKey, resource_id: order.order_id || order.id }
     );
 
-    console.log(`[Webhook] ${templateEventTopic} → SMS ${result.success ? 'sent' : 'failed'} to ${phone} for store ${store_id}`);
+    console.log(`[Webhook] ${eventKey} → SMS ${result.success ? 'sent' : 'failed'} to ${phone} for store ${store_id}`);
 
     res.status(200).send({
         message: result.success ? 'SMS sent.' : 'SMS failed.',

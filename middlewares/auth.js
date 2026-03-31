@@ -74,6 +74,13 @@ async function verifyViaPlatform(sessionToken) {
  *     Verified with shared JWT_SECRET. Used during migration.
  */
 module.exports = async function (req, res, next) {
+    // ── Dev bypass: skip auth in development ──
+    if (process.env.NODE_ENV === 'development' && process.env.DEV_BYPASS_AUTH === 'true') {
+        req.user = { store_id: Number(process.env.DEV_STORE_ID || 2), installation_id: 1, app_id: 2 };
+        req.installation = { installation_id: 1, store_id: req.user.store_id, status: 'active' };
+        return next();
+    }
+
     // ── Mode 1: Session Token ──
     const sessionToken = req.header('X-Session-Token') || req.header('x-session-token');
     if (sessionToken) {

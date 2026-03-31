@@ -98,10 +98,9 @@ Router.post('/send', auth, asyncMiddleware(async (req, res) => {
 
     if (!result.success && result.error === 'insufficient_balance') {
         return res.status(402).send({
-            message: 'Insufficient SMS credits. Please top up your wallet.',
+            message: 'No SMS credits remaining. Please buy a package.',
             code: 'insufficient_balance',
-            balance: result.balance,
-            required: result.required,
+            sms_credits: result.sms_credits,
             status: 402,
         });
     }
@@ -118,12 +117,11 @@ Router.post('/send', auth, asyncMiddleware(async (req, res) => {
  * Get SMS delivery logs (paginated)
  */
 Router.get('/logs', auth, asyncMiddleware(async (req, res) => {
-    const { page, limit, status, phone } = req.query;
+    const { page, limit, status, phone, event_topic, from_date, to_date } = req.query;
     const logs = await messaging.getLogs(req.user.store_id, {
         page: Number(page) || 1,
         limit: Number(limit) || 20,
-        status,
-        phone,
+        status, phone, event_topic, from_date, to_date,
     });
     res.send({ message: 'Logs fetched.', data: logs, status: 200 });
 }));

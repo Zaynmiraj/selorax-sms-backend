@@ -1,5 +1,5 @@
 const { connection } = require('../startup/db');
-const { resolveProvider, getPricePerSms } = require('../services/sms-providers');
+const { resolveProvider } = require('../services/sms-providers');
 
 /**
  * Get messaging settings for a store
@@ -18,7 +18,11 @@ async function getSettings(store_id) {
  * Update messaging settings
  */
 async function updateSettings(store_id, installation_id, updates) {
-    const allowed = ['is_enabled', 'use_own_provider', 'provider', 'api_key', 'sender_id', 'provider_endpoint', 'auto_sms_enabled'];
+    const allowed = [
+        'is_enabled', 'use_own_provider', 'provider', 'api_key', 'sender_id',
+        'provider_endpoint', 'auto_sms_enabled',
+        'auto_renew_enabled', 'auto_renew_package_id', 'auto_renew_threshold',
+    ];
     const sets = [];
     const params = [];
 
@@ -122,18 +126,15 @@ function renderTemplate(templateText, variables = {}) {
 
 /**
  * Core send SMS function.
- * Checks balance → deducts → sends via provider → logs result.
+ * Checks SMS credits → sends via provider → deducts 1 credit → logs result.
  */
 async function sendSms(store_id, installation_id, phone, message, { event_topic, resource_id } = {}) {
     const wallet = require('./messaging-wallet');
 
-    // Get pricing
-    const pricePerSms = await getPricePerSms();
-
-    // Check balance
-    const balance = await wallet.getBalance(store_id);
-    if (balance < pricePerSms) {
-        return { success: false, error: 'insufficient_balance', balance, required: pricePerSms };
+    // Check SMS credits
+    const credits = await wallet.getCredits(store_id);
+    if (credits < 1) {
+        return { success: false, error: 'insufficient_balance', sms_credits: credits };
     }
 
     // Get settings and resolve provider
@@ -160,15 +161,14 @@ async function sendSms(store_id, installation_id, phone, message, { event_topic,
         console.error(`[SMS] Log insert failed for store ${store_id}, phone ${phone}:`, logErr.message);
     }
 
-    // Deduct from wallet only if sent successfully
+    // Deduct 1 SMS credit only if sent successfully
     let debitSuccess = false;
     if (result.success) {
         try {
-            await wallet.deduct(store_id, pricePerSms, `SMS to ${phone}`, sms_log_id);
+            await wallet.deductCredit(store_id, 1);
             debitSuccess = true;
         } catch (debitErr) {
-            console.error(`[SMS] Wallet debit failed for store ${store_id}, amount ${pricePerSms}:`, debitErr.message);
-            // SMS was sent but debit failed — log for reconciliation
+            console.error(`[SMS] Credit deduct failed for store ${store_id}:`, debitErr.message);
             try {
                 await connection.promise().query(/*sql*/`
                     UPDATE app_messaging_logs SET provider_response = JSON_SET(COALESCE(provider_response, '{}'), '$.debit_error', ?)
@@ -178,10 +178,12 @@ async function sendSms(store_id, installation_id, phone, message, { event_topic,
         }
     }
 
+    const remainingCredits = await wallet.getCredits(store_id);
+
     return {
         success: result.success,
         log_id: sms_log_id,
-        balance_after: result.success && debitSuccess ? (balance - pricePerSms) : balance,
+        sms_credits: remainingCredits,
         provider_response: result.provider_response,
     };
 }
@@ -189,7 +191,7 @@ async function sendSms(store_id, installation_id, phone, message, { event_topic,
 /**
  * Get paginated SMS logs
  */
-async function getLogs(store_id, { page = 1, limit = 20, status, phone } = {}) {
+async function getLogs(store_id, { page = 1, limit = 20, status, phone, event_topic, from_date, to_date } = {}) {
     const offset = (page - 1) * limit;
     let where = 'WHERE store_id = ?';
     const params = [store_id];
@@ -201,6 +203,18 @@ async function getLogs(store_id, { page = 1, limit = 20, status, phone } = {}) {
     if (phone) {
         where += ' AND phone LIKE ?';
         params.push(`%${phone}%`);
+    }
+    if (event_topic) {
+        where += ' AND event_topic = ?';
+        params.push(event_topic);
+    }
+    if (from_date) {
+        where += ' AND created_at >= ?';
+        params.push(from_date);
+    }
+    if (to_date) {
+        where += ' AND created_at <= ?';
+        params.push(to_date + ' 23:59:59');
     }
 
     const [rows] = await connection.promise().query(/*sql*/`

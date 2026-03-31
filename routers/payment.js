@@ -5,25 +5,28 @@ const asyncMiddleware = require('../middlewares/asyncMiddleware');
 const payment = require('../models/messaging-payment');
 
 /**
+ * GET /api/messaging/packages
+ * List available SMS packages
+ */
+Router.get('/packages', auth, asyncMiddleware(async (req, res) => {
+    const packages = await payment.getPackages();
+    res.send({ message: 'Packages fetched.', data: packages, status: 200 });
+}));
+
+/**
  * POST /api/messaging/payment/topup
- * Create a wallet top-up charge via platform billing API.
- * Returns confirmation_url — frontend sends this to parent frame
- * via postMessage for the merchant to approve.
+ * Purchase an SMS package. Accepts package_id.
  */
 Router.post('/topup', auth, asyncMiddleware(async (req, res) => {
-    const { amount } = req.body;
+    const { package_id } = req.body;
 
-    if (!amount || amount < 10) {
-        return res.status(400).send({ message: 'Minimum top-up amount is 10 BDT.', status: 400 });
+    if (!package_id) {
+        return res.status(400).send({ message: 'Please select an SMS package.', status: 400 });
     }
 
-    if (amount > 50000) {
-        return res.status(400).send({ message: 'Maximum top-up amount is 50,000 BDT.', status: 400 });
-    }
-
-    const result = await payment.initiateTopup(
+    const result = await payment.initiatePurchase(
         req.user.store_id,
-        parseFloat(amount)
+        Number(package_id)
     );
 
     res.send({
@@ -35,7 +38,7 @@ Router.post('/topup', auth, asyncMiddleware(async (req, res) => {
 
 /**
  * GET /api/messaging/payment/verify/:charge_id
- * Check status of a charge (for polling from frontend)
+ * Check status of a charge. Auto-credits SMS on success.
  */
 Router.get('/verify/:charge_id', auth, asyncMiddleware(async (req, res) => {
     const charge = await payment.getChargeStatus(
@@ -52,6 +55,19 @@ Router.get('/verify/:charge_id', auth, asyncMiddleware(async (req, res) => {
         data: charge,
         status: 200,
     });
+}));
+
+/**
+ * GET /api/messaging/payment/purchases
+ * Purchase history for the store
+ */
+Router.get('/purchases', auth, asyncMiddleware(async (req, res) => {
+    const { page, limit } = req.query;
+    const result = await payment.getPurchaseHistory(req.user.store_id, {
+        page: Number(page) || 1,
+        limit: Number(limit) || 20,
+    });
+    res.send({ message: 'Purchase history.', data: result, status: 200 });
 }));
 
 module.exports = Router;

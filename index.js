@@ -13,6 +13,10 @@ connect();
 const scheduler = require('./services/scheduler');
 scheduler.start();
 
+// Start the campaign sender
+const campaignSender = require('./services/campaign-sender');
+campaignSender.start();
+
 const port = process.env.PORT || 5002;
 const server = app.listen(port, () => {
     console.log(`[SeloraX Messaging] Running on port ${port}`);
@@ -22,6 +26,7 @@ const server = app.listen(port, () => {
 function shutdown(signal) {
     console.log(`[SeloraX Messaging] ${signal} received — shutting down gracefully`);
     scheduler.stop();
+    campaignSender.stop();
     server.close(() => {
         connection.end(() => {
             console.log('[SeloraX Messaging] Shut down complete');

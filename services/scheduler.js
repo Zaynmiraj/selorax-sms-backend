@@ -1,7 +1,9 @@
 const { connection } = require('../startup/db');
 const messaging = require('../models/messaging');
+const payment = require('../models/messaging-payment');
 
 let pollInterval = null;
+let renewalInterval = null;
 const POLL_INTERVAL_MS = 10000; // Check every 10 seconds
 const BATCH_SIZE = 20;
 
@@ -138,6 +140,36 @@ async function handleJobFailure(job, errorMsg) {
 }
 
 /**
+ * Check if any stores need auto-renewal of SMS credits.
+ */
+async function checkAutoRenewals() {
+    const [rows] = await connection.promise().query(
+        `SELECT s.store_id, s.installation_id, s.sms_credits, s.auto_renew_package_id, s.auto_renew_threshold
+         FROM app_messaging_settings s
+         WHERE s.auto_renew_enabled = 1
+           AND s.auto_renew_package_id IS NOT NULL
+           AND s.sms_credits <= s.auto_renew_threshold`
+    );
+
+    for (const store of rows) {
+        try {
+            const [pending] = await connection.promise().query(
+                `SELECT 1 FROM app_messaging_purchases
+                 WHERE store_id = ? AND status = 'pending'
+                   AND created_at > DATE_SUB(NOW(), INTERVAL 1 HOUR) LIMIT 1`,
+                [store.store_id]
+            );
+            if (pending.length > 0) continue;
+
+            await payment.initiatePurchase(store.store_id, store.auto_renew_package_id);
+            console.log(`[AutoRenew] Initiated purchase for store ${store.store_id}`);
+        } catch (err) {
+            console.error(`[AutoRenew] Failed for store ${store.store_id}:`, err.message);
+        }
+    }
+}
+
+/**
  * Start the scheduler polling loop
  */
 function start() {
@@ -152,6 +184,14 @@ function start() {
     }, POLL_INTERVAL_MS);
     // Don't block process exit
     pollInterval.unref();
+
+    // Auto-renewal check every 60 seconds
+    renewalInterval = setInterval(async () => {
+        try { await checkAutoRenewals(); } catch (err) {
+            console.error('[AutoRenew] Check error:', err.message);
+        }
+    }, 60000);
+    renewalInterval.unref();
 }
 
 /**
@@ -161,8 +201,12 @@ function stop() {
     if (pollInterval) {
         clearInterval(pollInterval);
         pollInterval = null;
-        console.log('[Scheduler] Stopped');
     }
+    if (renewalInterval) {
+        clearInterval(renewalInterval);
+        renewalInterval = null;
+    }
+    console.log('[Scheduler] Stopped');
 }
 
 module.exports = {
@@ -171,6 +215,7 @@ module.exports = {
     cancelAllForStore,
     getScheduledJobs,
     processDueJobs,
+    checkAutoRenewals,
     start,
     stop,
 };
