@@ -27,7 +27,12 @@ Router.get('/audience/customers', auth, asyncMiddleware(async (req, res) => {
 
     // Try platform API first
     try {
-        const result = await platformApi.get(store_id, '/apps/v1/customers', { page, limit, search });
+        const result = await platformApi.get(store_id, '/apps/v1/customers', {
+            page,
+            limit,
+            search,
+            include_guests: true,
+        });
         return res.send({ message: 'Customers fetched.', data: result?.data, status: 200 });
     } catch (platformErr) {
         // Fallback: query users table directly (shared DB)
@@ -89,7 +94,11 @@ Router.post('/', auth, asyncMiddleware(async (req, res) => {
         if (phoneList.length === 0) return res.status(400).send({ message: 'No valid BD phone numbers found.', status: 400 });
     } else if (audience_type === 'filter') {
         try {
-            const result = await platformApi.get(req.user.store_id, '/apps/v1/customers', { ...filters, limit: 10000 });
+            const result = await platformApi.get(req.user.store_id, '/apps/v1/customers', {
+                ...filters,
+                limit: 10000,
+                include_guests: true,
+            });
             const customers = result?.data?.customers || result?.data || [];
             phoneList = customers.map(c => (c.phone || c.customer_phone || '').replace(/[\s\-()]+/g, '')).filter(p => BD_PHONE_REGEX.test(p));
         } catch (err) {
