@@ -5,6 +5,7 @@ const asyncMiddleware = require('../middlewares/asyncMiddleware');
 const campaigns = require('../models/messaging-campaigns');
 const wallet = require('../models/messaging-wallet');
 const platformApi = require('../services/platform-api');
+const { calculateSmsParts } = require('../models/messaging');
 
 const BD_PHONE_REGEX = /^(?:\+?880|0)1[3-9]\d{8}$/;
 
@@ -101,11 +102,12 @@ Router.post('/', auth, asyncMiddleware(async (req, res) => {
 
     phoneList = [...new Set(phoneList)]; // deduplicate
 
+    const parts = phoneList.length * calculateSmsParts(message);
     const credits = await wallet.getCredits(req.user.store_id);
-    if (credits < phoneList.length) {
+    if (credits < parts) {
         return res.status(402).send({
-            message: `Not enough SMS credits. Need ${phoneList.length}, have ${credits}.`,
-            sms_credits: credits, required: phoneList.length, status: 402,
+            message: `Not enough SMS credits. Need ${parts}, have ${credits}.`,
+            sms_credits: credits, required: parts, status: 402,
         });
     }
 

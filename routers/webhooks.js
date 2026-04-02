@@ -9,7 +9,7 @@ const scheduler = require('../services/scheduler');
 
 /**
  * Verify HMAC-SHA256 webhook signature.
- * The platform signs "timestamp.body" with the subscription's signing_secret.
+ * The platform signs "timestamp.body" with the store-specific signing_secret.
  * Header format: "sha256=<hex digest>"
  */
 function verifySignature(body, signatureHeader, timestamp, secret) {
@@ -45,20 +45,30 @@ Router.post('/receive', asyncMiddleware(async (req, res) => {
         return res.status(400).send({ message: 'Missing webhook headers.', status: 400 });
     }
 
-    // Verify HMAC signature (platform signs "timestamp.rawBody")
-    const rawBody = req.rawBody ? req.rawBody.toString('utf8') : JSON.stringify(req.body);
-    const signingSecret = process.env.WEBHOOK_SIGNING_SECRET;
+    const payload = req.body || {};
+    const rawBody = req.rawBody ? req.rawBody.toString('utf8') : JSON.stringify(payload);
+    const store_id = payload.store_id;
+
+    if (!store_id) {
+        return res.status(400).send({ message: 'Missing store_id in payload.', status: 400 });
+    }
+
+    let signingSecret = await messaging.getWebhookSigningSecret(store_id);
+    if (!signingSecret && process.env.WEBHOOK_SIGNING_SECRET) {
+        signingSecret = process.env.WEBHOOK_SIGNING_SECRET;
+    }
+    if (!signingSecret) {
+        signingSecret = await messaging.ensureWebhookSigningSecret(store_id);
+    }
 
     if (!verifySignature(rawBody, signature, timestamp, signingSecret)) {
         console.warn('[Webhook] Invalid signature for event:', eventTopic);
         return res.status(401).send({ message: 'Invalid webhook signature.', status: 401 });
     }
 
-    const { store_id, data } = req.body;
+    const data = payload.data;
+    // store_id already validated
 
-    if (!store_id) {
-        return res.status(400).send({ message: 'Missing store_id in payload.', status: 400 });
-    }
 
     // HMAC signature already proves the webhook came from the platform.
     // No need to look up app_installations — use store_id directly.

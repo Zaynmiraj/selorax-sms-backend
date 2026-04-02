@@ -7,6 +7,8 @@
  */
 const platformBilling = require('../services/platform-billing');
 const { connection } = require('../startup/db');
+const CUSTOM_SMS_UNIT_PRICE = 0.70;
+const MAX_CUSTOM_SMS_COUNT = 100000;
 
 /**
  * Get all active SMS packages
@@ -52,6 +54,47 @@ async function initiatePurchase(store_id, package_id) {
         amount: charge.amount,
         status: charge.status,
         package: pkg,
+    };
+}
+
+/**
+ * Initiate a custom SMS purchase at a flat per-SMS rate.
+ */
+async function initiateCustomPurchase(store_id, sms_count) {
+    const normalizedCount = Number(sms_count);
+
+    if (!Number.isInteger(normalizedCount) || normalizedCount < 1) {
+        throw Object.assign(new Error('sms_count must be a positive integer'), { status: 400 });
+    }
+
+    if (normalizedCount > MAX_CUSTOM_SMS_COUNT) {
+        throw Object.assign(new Error(`sms_count cannot exceed ${MAX_CUSTOM_SMS_COUNT}`), { status: 400 });
+    }
+
+    const totalPrice = Number((normalizedCount * CUSTOM_SMS_UNIT_PRICE).toFixed(2));
+    const customLabel = `Custom SMS Purchase (${normalizedCount} SMS)`;
+
+    const charge = await platformBilling.createWalletTopupCharge(store_id, totalPrice, {
+        name: customLabel,
+    });
+
+    await connection.promise().query(/*sql*/`
+        INSERT INTO app_messaging_purchases
+            (store_id, package_id, purchase_type, custom_label, unit_price, charge_id, sms_count, amount, status)
+        VALUES (?, NULL, 'custom', ?, ?, ?, ?, ?, 'pending')
+    `, [store_id, customLabel, CUSTOM_SMS_UNIT_PRICE, charge.charge_id, normalizedCount, totalPrice]);
+
+    return {
+        charge_id: charge.charge_id,
+        confirmation_url: charge.confirmation_url,
+        amount: charge.amount,
+        status: charge.status,
+        custom_purchase: {
+            sms_count: normalizedCount,
+            unit_price: CUSTOM_SMS_UNIT_PRICE,
+            total_price: totalPrice,
+            label: customLabel,
+        },
     };
 }
 
@@ -117,7 +160,7 @@ async function creditPurchase(store_id, charge_id) {
 async function getPurchaseHistory(store_id, { page = 1, limit = 20 } = {}) {
     const offset = (page - 1) * limit;
     const [rows] = await connection.promise().query(/*sql*/`
-        SELECT p.*, pkg.name as package_name
+        SELECT p.*, COALESCE(pkg.name, p.custom_label) as package_name
         FROM app_messaging_purchases p
         LEFT JOIN app_messaging_packages pkg ON pkg.package_id = p.package_id
         WHERE p.store_id = ?
@@ -136,7 +179,10 @@ module.exports = {
     getPackages,
     getPackage,
     initiatePurchase,
+    initiateCustomPurchase,
     getChargeStatus,
     creditPurchase,
     getPurchaseHistory,
+    CUSTOM_SMS_UNIT_PRICE,
+    MAX_CUSTOM_SMS_COUNT,
 };

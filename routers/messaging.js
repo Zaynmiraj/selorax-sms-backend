@@ -75,7 +75,7 @@ Router.delete('/templates/:template_id', auth, asyncMiddleware(async (req, res) 
  * Send a manual SMS (deducts credits)
  */
 Router.post('/send', auth, asyncMiddleware(async (req, res) => {
-    const { phone, message } = req.body;
+    const { phone, message, event_topic, resource_id, source_app, metadata } = req.body;
 
     if (!phone || !message) {
         return res.status(400).send({ message: 'phone and message are required.', status: 400 });
@@ -93,7 +93,12 @@ Router.post('/send', auth, asyncMiddleware(async (req, res) => {
         req.installation.installation_id,
         phone,
         message,
-        { event_topic: 'manual' }
+        {
+            event_topic: event_topic || (source_app ? `app.${source_app}` : 'manual'),
+            resource_id: resource_id || null,
+            source_app: source_app || null,
+            metadata: metadata || null,
+        }
     );
 
     if (!result.success && result.error === 'insufficient_balance') {

@@ -1,5 +1,21 @@
+const crypto = require('crypto');
 const { connection } = require('../startup/db');
 const { resolveProvider } = require('../services/sms-providers');
+
+const GSM7_REGEX = /^[@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞ ÆæßÉ !"#¤%&'()*+,\-.\/0-9:;<=>?¡A-ZÄÖÑÜa-zäöñüà^{}\\[\\]~|€]*$/;
+
+function calculateSmsParts(message) {
+    if (!message) return 1;
+    const isUnicode = !GSM7_REGEX.test(message);
+    const singleLimit = isUnicode ? 70 : 160;
+    const multiLimit = isUnicode ? 67 : 153;
+    const len = message.length;
+    return len <= singleLimit ? 1 : Math.ceil(len / multiLimit);
+}
+
+function generateWebhookSecret() {
+    return crypto.randomBytes(16).toString('hex');
+}
 
 /**
  * Get messaging settings for a store
@@ -12,6 +28,27 @@ async function getSettings(store_id) {
         LIMIT 1
     `, [store_id]);
     return rows[0] || null;
+}
+
+async function getWebhookSigningSecret(store_id) {
+    const [rows] = await connection.promise().query(/*sql*/`
+        SELECT webhook_signing_secret FROM app_messaging_settings
+        WHERE store_id = ? LIMIT 1
+    `, [store_id]);
+    return rows[0]?.webhook_signing_secret || null;
+}
+
+async function ensureWebhookSigningSecret(store_id) {
+    let secret = await getWebhookSigningSecret(store_id);
+    if (secret) return secret;
+
+    secret = generateWebhookSecret();
+    await connection.promise().query(/*sql*/`
+        UPDATE app_messaging_settings
+        SET webhook_signing_secret = ?
+        WHERE store_id = ?
+    `, [secret, store_id]);
+    return secret;
 }
 
 /**
@@ -49,13 +86,19 @@ async function updateSettings(store_id, installation_id, updates) {
  */
 async function ensureSettings(store_id, installation_id) {
     const existing = await getSettings(store_id);
-    if (existing) return existing;
+    if (existing) {
+        if (!existing.webhook_signing_secret) {
+            await ensureWebhookSigningSecret(store_id);
+        }
+        return getSettings(store_id);
+    }
 
     await connection.promise().query(/*sql*/`
         INSERT IGNORE INTO app_messaging_settings (installation_id, store_id)
         VALUES (?, ?)
     `, [installation_id, store_id]);
 
+    await ensureWebhookSigningSecret(store_id);
     return getSettings(store_id);
 }
 
@@ -126,14 +169,15 @@ function renderTemplate(templateText, variables = {}) {
 
 /**
  * Core send SMS function.
- * Checks SMS credits → sends via provider → deducts 1 credit → logs result.
+ * Checks SMS credits → sends via provider → deducts calculated credits → logs result.
  */
-async function sendSms(store_id, installation_id, phone, message, { event_topic, resource_id } = {}) {
+async function sendSms(store_id, installation_id, phone, message, { event_topic, resource_id, source_app, metadata } = {}) {
     const wallet = require('./messaging-wallet');
 
     // Check SMS credits
     const credits = await wallet.getCredits(store_id);
-    if (credits < 1) {
+    const parts = calculateSmsParts(message);
+    if (credits < parts) {
         return { success: false, error: 'insufficient_balance', sms_credits: credits };
     }
 
@@ -143,6 +187,13 @@ async function sendSms(store_id, installation_id, phone, message, { event_topic,
 
     // Send SMS
     const result = await provider.sendSms(phone, message);
+    const enrichedProviderResponse = {
+        ...(result.provider_response || {}),
+        meta: {
+            source_app: source_app || null,
+            metadata: metadata || null,
+        },
+    };
 
     // Log the SMS
     let sms_log_id = null;
@@ -154,7 +205,7 @@ async function sendSms(store_id, installation_id, phone, message, { event_topic,
             store_id, installation_id, phone, message,
             event_topic || null, resource_id || null,
             result.success ? 'sent' : 'failed',
-            JSON.stringify(result.provider_response),
+            JSON.stringify(enrichedProviderResponse),
         ]);
         sms_log_id = logResult.insertId;
     } catch (logErr) {
@@ -165,7 +216,7 @@ async function sendSms(store_id, installation_id, phone, message, { event_topic,
     let debitSuccess = false;
     if (result.success) {
         try {
-            await wallet.deductCredit(store_id, 1);
+            await wallet.deductCredit(store_id, parts);
             debitSuccess = true;
         } catch (debitErr) {
             console.error(`[SMS] Credit deduct failed for store ${store_id}:`, debitErr.message);
@@ -184,7 +235,7 @@ async function sendSms(store_id, installation_id, phone, message, { event_topic,
         success: result.success,
         log_id: sms_log_id,
         sms_credits: remainingCredits,
-        provider_response: result.provider_response,
+        provider_response: enrichedProviderResponse,
     };
 }
 
@@ -266,7 +317,10 @@ module.exports = {
     upsertTemplate,
     deleteTemplate,
     renderTemplate,
+    calculateSmsParts,
     sendSms,
     getLogs,
     getStats,
+    getWebhookSigningSecret,
+    ensureWebhookSigningSecret,
 };

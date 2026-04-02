@@ -18,16 +18,21 @@ Router.get('/packages', auth, asyncMiddleware(async (req, res) => {
  * Purchase an SMS package. Accepts package_id.
  */
 Router.post('/topup', auth, asyncMiddleware(async (req, res) => {
-    const { package_id } = req.body;
+    const { package_id, sms_count } = req.body;
 
-    if (!package_id) {
-        return res.status(400).send({ message: 'Please select an SMS package.', status: 400 });
+    if (!package_id && !sms_count) {
+        return res.status(400).send({ message: 'Please select a package or enter a custom SMS quantity.', status: 400 });
     }
 
-    const result = await payment.initiatePurchase(
-        req.user.store_id,
-        Number(package_id)
-    );
+    const result = package_id
+        ? await payment.initiatePurchase(
+            req.user.store_id,
+            Number(package_id)
+        )
+        : await payment.initiateCustomPurchase(
+            req.user.store_id,
+            Number(sms_count)
+        );
 
     res.send({
         message: 'Charge created. Redirect merchant to approve payment.',

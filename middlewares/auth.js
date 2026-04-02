@@ -138,12 +138,21 @@ module.exports = async function (req, res, next) {
         return res.status(401).send({ message: 'Invalid token.', status: 401 });
     }
 
-    const store_id = req.header('x-store-id') || req.query.store_id;
-    if (!store_id) {
-        return res.status(400).send({ message: 'x-store-id header is required.', status: 400 });
+    const headerStoreId = req.header('x-store-id') || req.query?.store_id || req.body?.store_id || '';
+    const tokenStoreId = decoded?.store_id ?? decoded?.storeId ?? decoded?.sub;
+    const finalStoreId = Number(tokenStoreId ?? headerStoreId) || null;
+
+    if (!finalStoreId) {
+        return res.status(400).send({ message: 'store_id is required in token or header.', status: 400 });
     }
 
-    req.user = { ...decoded, store_id: Number(store_id) };
-    req.installation = { store_id: Number(store_id), status: 'active' };
+    if (tokenStoreId && headerStoreId && Number(tokenStoreId) !== Number(headerStoreId)) {
+        return res.status(403).send({ message: 'store_id mismatch between token and header.', status: 403 });
+    }
+
+    const installationId = Number(decoded?.installation_id ?? decoded?.installationId ?? decoded?.sid) || null;
+
+    req.user = { ...decoded, store_id: finalStoreId };
+    req.installation = { store_id: finalStoreId, installation_id: installationId, status: 'active' };
     next();
 };
