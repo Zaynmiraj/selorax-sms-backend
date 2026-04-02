@@ -9,6 +9,12 @@ const platformBilling = require('../services/platform-billing');
 const { connection } = require('../startup/db');
 const CUSTOM_SMS_UNIT_PRICE = 0.70;
 const MAX_CUSTOM_SMS_COUNT = 100000;
+const DASHBOARD_URL = process.env.DASHBOARD_URL || 'https://admin.selorax.io';
+const APP_EMBED_SLUG = process.env.SELORAX_APP_SLUG || 'selorax-messaging';
+
+function getReturnUrl(store_id) {
+    return `${DASHBOARD_URL}/${store_id}/apps/e/${APP_EMBED_SLUG}`;
+}
 
 /**
  * Get all active SMS packages
@@ -40,6 +46,7 @@ async function initiatePurchase(store_id, package_id) {
 
     const charge = await platformBilling.createWalletTopupCharge(store_id, pkg.total_price, {
         name: `SMS Package: ${pkg.name} (${pkg.sms_count} SMS)`,
+        return_url: getReturnUrl(store_id),
     });
 
     // Track the pending purchase locally
@@ -76,6 +83,7 @@ async function initiateCustomPurchase(store_id, sms_count) {
 
     const charge = await platformBilling.createWalletTopupCharge(store_id, totalPrice, {
         name: customLabel,
+        return_url: getReturnUrl(store_id),
     });
 
     await connection.promise().query(/*sql*/`
