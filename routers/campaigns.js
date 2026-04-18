@@ -45,7 +45,14 @@ Router.get('/audience/customers', auth, asyncMiddleware(async (req, res) => {
                 const term = `%${search}%`;
                 params.push(term, term, term);
             }
-            const platformDb = process.env.PLATFORM_DATABASE || 'selorax_dev';
+            const platformDbRaw = process.env.PLATFORM_DATABASE || 'selorax_dev';
+            // Validate the identifier: only [a-zA-Z0-9_] is allowed in a MySQL
+            // database name we'll interpolate. Reject anything suspicious so
+            // we cannot produce an injectable fragment even if the env is mis-set.
+            if (!/^[a-zA-Z0-9_]+$/.test(platformDbRaw)) {
+                return res.status(500).send({ message: 'Invalid PLATFORM_DATABASE configuration.', status: 500 });
+            }
+            const platformDb = `\`${platformDbRaw}\``;
             const [customers] = await connection.promise().query(
                 `SELECT user_id, name, phone, email, created_at FROM ${platformDb}.users ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
                 [...params, limit, offset]

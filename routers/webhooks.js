@@ -61,6 +61,11 @@ Router.post('/receive', asyncMiddleware(async (req, res) => {
         signingSecret = await messaging.ensureWebhookSigningSecret(store_id);
     }
 
+    if (!signingSecret) {
+        console.warn(`[Webhook] No signing secret available for store ${store_id} (settings row missing).`);
+        return res.status(401).send({ message: 'Webhook rejected: store not configured.', status: 401 });
+    }
+
     if (!verifySignature(rawBody, signature, timestamp, signingSecret)) {
         console.warn('[Webhook] Invalid signature for event:', eventTopic);
         return res.status(401).send({ message: 'Invalid webhook signature.', status: 401 });

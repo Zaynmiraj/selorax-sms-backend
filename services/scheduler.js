@@ -1,9 +1,12 @@
+const crypto = require('crypto');
 const { connection } = require('../startup/db');
 const messaging = require('../models/messaging');
 const payment = require('../models/messaging-payment');
 
 let pollInterval = null;
 let renewalInterval = null;
+let pollInFlight = false;
+let renewalInFlight = false;
 const POLL_INTERVAL_MS = 10000; // Check every 10 seconds
 const BATCH_SIZE = 20;
 
@@ -72,23 +75,44 @@ async function getScheduledJobs(store_id, { page = 1, limit = 20, status } = {})
  * Process due jobs — called by the poll interval
  */
 async function processDueJobs() {
-    // Grab a batch of due jobs and mark them processing (atomic)
-    const [jobs] = await connection.promise().query(/*sql*/`
-        SELECT * FROM app_messaging_scheduled
+    // Atomic claim: mark due pending jobs as 'processing' in one UPDATE and
+    // tag them with a unique claim token in `last_error` so we can then
+    // SELECT exactly the rows we just claimed. This eliminates the
+    // SELECT-then-UPDATE race where overlapping workers would double-process.
+    const claimToken = `__claim:${process.pid}:${Date.now()}:${crypto.randomBytes(6).toString('hex')}`;
+
+    const [claimResult] = await connection.promise().query(/*sql*/`
+        UPDATE app_messaging_scheduled
+        SET status = 'processing', last_error = ?
         WHERE status = 'pending' AND scheduled_at <= NOW()
         ORDER BY scheduled_at ASC
         LIMIT ?
-    `, [BATCH_SIZE]);
+    `, [claimToken, BATCH_SIZE]);
 
-    if (jobs.length === 0) return;
+    if (claimResult.affectedRows === 0) return;
 
-    const jobIds = jobs.map(j => j.job_id);
-    await connection.promise().query(/*sql*/`
-        UPDATE app_messaging_scheduled SET status = 'processing' WHERE job_id IN (?)
-    `, [jobIds]);
+    const [jobs] = await connection.promise().query(/*sql*/`
+        SELECT * FROM app_messaging_scheduled
+        WHERE last_error = ? AND status = 'processing'
+    `, [claimToken]);
 
     for (const job of jobs) {
         try {
+            // Re-check store is still enabled — skip (and mark cancelled) if the
+            // app was uninstalled while the job was queued.
+            const [storeRows] = await connection.promise().query(/*sql*/`
+                SELECT is_enabled, auto_sms_enabled FROM app_messaging_settings WHERE store_id = ?
+            `, [job.store_id]);
+            const store = storeRows[0];
+            if (!store || !store.is_enabled) {
+                await connection.promise().query(/*sql*/`
+                    UPDATE app_messaging_scheduled
+                    SET status = 'cancelled', processed_at = NOW(), last_error = 'Store disabled/uninstalled'
+                    WHERE job_id = ?
+                `, [job.job_id]);
+                continue;
+            }
+
             const result = await messaging.sendSms(
                 job.store_id,
                 job.installation_id,
@@ -100,7 +124,7 @@ async function processDueJobs() {
             if (result.success) {
                 await connection.promise().query(/*sql*/`
                     UPDATE app_messaging_scheduled
-                    SET status = 'sent', sms_log_id = ?, processed_at = NOW(), attempts = attempts + 1
+                    SET status = 'sent', sms_log_id = ?, processed_at = NOW(), attempts = attempts + 1, last_error = NULL
                     WHERE job_id = ?
                 `, [result.log_id, job.job_id]);
             } else {
@@ -176,10 +200,14 @@ function start() {
     if (pollInterval) return;
     console.log('[Scheduler] Started — polling every 10s');
     pollInterval = setInterval(async () => {
+        if (pollInFlight) return; // Skip if previous tick is still running
+        pollInFlight = true;
         try {
             await processDueJobs();
         } catch (err) {
             console.error('[Scheduler] Poll error:', err.message);
+        } finally {
+            pollInFlight = false;
         }
     }, POLL_INTERVAL_MS);
     // Don't block process exit
@@ -187,8 +215,12 @@ function start() {
 
     // Auto-renewal check every 60 seconds
     renewalInterval = setInterval(async () => {
+        if (renewalInFlight) return;
+        renewalInFlight = true;
         try { await checkAutoRenewals(); } catch (err) {
             console.error('[AutoRenew] Check error:', err.message);
+        } finally {
+            renewalInFlight = false;
         }
     }, 60000);
     renewalInterval.unref();

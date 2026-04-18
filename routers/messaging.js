@@ -110,10 +110,11 @@ Router.post('/send', auth, asyncMiddleware(async (req, res) => {
         });
     }
 
-    res.send({
+    const httpStatus = result.success ? 200 : 500;
+    res.status(httpStatus).send({
         message: result.success ? 'SMS sent successfully.' : 'SMS sending failed.',
         data: result,
-        status: result.success ? 200 : 500,
+        status: httpStatus,
     });
 }));
 

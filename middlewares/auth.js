@@ -8,6 +8,7 @@ const SELORAX_CLIENT_SECRET = process.env.SELORAX_CLIENT_SECRET;
 // In-memory cache for platform-verified session tokens
 const tokenCache = new Map();
 const TOKEN_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+const TOKEN_CACHE_MAX_SIZE = 10000; // Hard cap to prevent unbounded growth under token churn
 
 // Cleanup expired cache entries every 2 minutes
 setInterval(() => {
@@ -51,7 +52,12 @@ async function verifyViaPlatform(sessionToken) {
         app_id: body.data.app_id,
     };
 
-    // Cache successful verification
+    // Cache successful verification. If at capacity, evict the oldest entry
+    // (Map iteration order is insertion order) before inserting the new one.
+    if (tokenCache.size >= TOKEN_CACHE_MAX_SIZE) {
+        const oldestKey = tokenCache.keys().next().value;
+        if (oldestKey !== undefined) tokenCache.delete(oldestKey);
+    }
     tokenCache.set(sessionToken, {
         data: result,
         expiresAt: Date.now() + TOKEN_CACHE_TTL,

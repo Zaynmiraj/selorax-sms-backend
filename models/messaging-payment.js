@@ -134,32 +134,50 @@ async function getChargeStatus(store_id, charge_id) {
 
 /**
  * Credit SMS to store if the purchase hasn't been credited yet.
- * Uses atomic UPDATE guard to prevent double-crediting race condition.
+ * Wrapped in a transaction so we never leave a purchase marked `credited`
+ * without the corresponding balance increment (and vice versa).
  */
 async function creditPurchase(store_id, charge_id) {
-    // Atomically claim the purchase — only one caller can set status from pending to credited
-    const [result] = await connection.promise().query(/*sql*/`
-        UPDATE app_messaging_purchases
-        SET status = 'credited', credited_at = NOW()
-        WHERE store_id = ? AND charge_id = ? AND status = 'pending'
-    `, [store_id, charge_id]);
+    const conn = await connection.promise().getConnection();
+    try {
+        await conn.beginTransaction();
 
-    if (result.affectedRows === 0) return; // Already credited or not found
+        // Atomically claim the purchase — only one caller flips pending→credited
+        const [claim] = await conn.query(/*sql*/`
+            UPDATE app_messaging_purchases
+            SET status = 'credited', credited_at = NOW()
+            WHERE store_id = ? AND charge_id = ? AND status = 'pending'
+        `, [store_id, charge_id]);
 
-    // Get the sms_count for the credited purchase
-    const [purchases] = await connection.promise().query(/*sql*/`
-        SELECT sms_count FROM app_messaging_purchases
-        WHERE store_id = ? AND charge_id = ? AND status = 'credited'
-    `, [store_id, charge_id]);
+        if (claim.affectedRows === 0) {
+            await conn.commit();
+            return; // Already credited or not found
+        }
 
-    if (!purchases.length) return;
+        const [purchases] = await conn.query(/*sql*/`
+            SELECT sms_count FROM app_messaging_purchases
+            WHERE store_id = ? AND charge_id = ? AND status = 'credited'
+        `, [store_id, charge_id]);
 
-    // Add SMS credits to store settings
-    await connection.promise().query(/*sql*/`
-        UPDATE app_messaging_settings
-        SET sms_credits = sms_credits + ?
-        WHERE store_id = ?
-    `, [purchases[0].sms_count, store_id]);
+        if (!purchases.length) {
+            // Should not happen — we just claimed the row — but roll back to be safe.
+            await conn.rollback();
+            return;
+        }
+
+        await conn.query(/*sql*/`
+            UPDATE app_messaging_settings
+            SET sms_credits = sms_credits + ?
+            WHERE store_id = ?
+        `, [purchases[0].sms_count, store_id]);
+
+        await conn.commit();
+    } catch (err) {
+        await conn.rollback();
+        throw err;
+    } finally {
+        conn.release();
+    }
 }
 
 /**

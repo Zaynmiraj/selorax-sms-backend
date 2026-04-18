@@ -39,16 +39,24 @@ async function getWebhookSigningSecret(store_id) {
 }
 
 async function ensureWebhookSigningSecret(store_id) {
-    let secret = await getWebhookSigningSecret(store_id);
-    if (secret) return secret;
+    const existing = await getWebhookSigningSecret(store_id);
+    if (existing) return existing;
 
-    secret = generateWebhookSecret();
-    await connection.promise().query(/*sql*/`
+    const candidate = generateWebhookSecret();
+    const [result] = await connection.promise().query(/*sql*/`
         UPDATE app_messaging_settings
         SET webhook_signing_secret = ?
-        WHERE store_id = ?
-    `, [secret, store_id]);
-    return secret;
+        WHERE store_id = ? AND (webhook_signing_secret IS NULL OR webhook_signing_secret = '')
+    `, [candidate, store_id]);
+
+    // If no row matched, either the settings row doesn't exist yet or another
+    // concurrent call already populated the secret. Re-read to get the
+    // authoritative value instead of returning an in-memory secret that was
+    // never persisted (which would break HMAC verification on next request).
+    if (result.affectedRows === 0) {
+        return getWebhookSigningSecret(store_id);
+    }
+    return candidate;
 }
 
 /**
