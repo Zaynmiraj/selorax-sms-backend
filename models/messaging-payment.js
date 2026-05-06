@@ -116,7 +116,7 @@ async function getChargeStatus(store_id, charge_id) {
 
         // If charge is active/completed, credit SMS if not already done
         if (charge.status === 'active' || charge.status === 'completed') {
-            await creditPurchase(store_id, charge_id);
+            await creditPurchase(store_id, charge.charge_id || charge_id);
         }
 
         return {
@@ -130,6 +130,15 @@ async function getChargeStatus(store_id, charge_id) {
         if (err.status === 404) return null;
         throw err;
     }
+}
+
+/**
+ * Look up a charge by EPS merchant_transaction_id (tran_id), then verify and
+ * credit. The platform endpoint accepts either form on /apps/v1/billing/charges/:id.
+ */
+async function getChargeStatusByTranId(store_id, tran_id) {
+    if (!tran_id) return null;
+    return getChargeStatus(store_id, tran_id);
 }
 
 /**
@@ -207,6 +216,7 @@ module.exports = {
     initiatePurchase,
     initiateCustomPurchase,
     getChargeStatus,
+    getChargeStatusByTranId,
     creditPurchase,
     getPurchaseHistory,
     CUSTOM_SMS_UNIT_PRICE,

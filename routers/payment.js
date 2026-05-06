@@ -42,14 +42,22 @@ Router.post('/topup', auth, asyncMiddleware(async (req, res) => {
 }));
 
 /**
- * GET /api/messaging/payment/verify/:charge_id
+ * GET /api/messaging/payment/verify/:id
  * Check status of a charge. Auto-credits SMS on success.
+ *
+ * The :id path param can be either a numeric platform charge_id OR a
+ * merchant_transaction_id (tran_id) string — EPS callbacks return either
+ * depending on flow. We auto-detect by whether the value parses as a
+ * positive integer.
  */
-Router.get('/verify/:charge_id', auth, asyncMiddleware(async (req, res) => {
-    const charge = await payment.getChargeStatus(
-        req.user.store_id,
-        Number(req.params.charge_id)
-    );
+Router.get('/verify/:id', auth, asyncMiddleware(async (req, res) => {
+    const raw = String(req.params.id || '');
+    const numericId = Number(raw);
+    const isCharge = Number.isInteger(numericId) && numericId > 0;
+
+    const charge = isCharge
+        ? await payment.getChargeStatus(req.user.store_id, numericId)
+        : await payment.getChargeStatusByTranId(req.user.store_id, raw);
 
     if (!charge) {
         return res.status(404).send({ message: 'Charge not found.', status: 404 });
