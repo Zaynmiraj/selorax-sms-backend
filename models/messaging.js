@@ -51,8 +51,18 @@ async function getWebhookSigningSecret(store_id) {
  * Platform fan-out signs each delivery with app_webhook_subscriptions.signing_secret.
  * Those subscription secrets live in the platform database, so use them as the
  * authoritative webhook signing secrets for the installed messaging app.
+ *
+ * If the platform DB doesn't exist on this MySQL connection (e.g. when the
+ * messaging app and platform run on different clusters), we cache that fact
+ * and stop retrying — otherwise every webhook delivery logs a noisy error.
+ * Verification still works via the local + env-fallback secrets in
+ * `getWebhookSigningSecrets`.
  */
+let platformLookupDisabled = false;
+
 async function getPlatformWebhookSigningSecrets(store_id, event_topic) {
+    if (platformLookupDisabled) return [];
+
     const platformDatabase = validateDatabaseIdentifier(process.env.PLATFORM_DATABASE);
     const appId = Number(process.env.SELORAX_APP_ID);
 
@@ -71,7 +81,15 @@ async function getPlatformWebhookSigningSecrets(store_id, event_topic) {
 
         return normalizeWebhookSigningSecrets(rows.map((row) => row.signing_secret));
     } catch (err) {
-        console.error('[Webhook] Failed to load platform webhook signing secrets:', err.message);
+        // Permanent errors (DB doesn't exist, no access) — disable for the
+        // process lifetime so we don't spam the log on every webhook.
+        if (err.code === 'ER_BAD_DB_ERROR' || err.code === 'ER_DBACCESS_DENIED_ERROR' || err.code === 'ER_NO_SUCH_TABLE') {
+            platformLookupDisabled = true;
+            console.warn(`[Webhook] Platform webhook secret lookup disabled for this process: ${err.message}. Falling back to local + env signing secrets.`);
+        } else {
+            // Transient error — log but keep trying on next webhook.
+            console.error('[Webhook] Failed to load platform webhook signing secrets:', err.message);
+        }
         return [];
     }
 }
