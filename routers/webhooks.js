@@ -31,6 +31,10 @@ function verifySignature(body, signatureHeader, timestamp, secret) {
     }
 }
 
+function verifySignatureWithAnySecret(body, signatureHeader, timestamp, secrets) {
+    return (secrets || []).some((secret) => verifySignature(body, signatureHeader, timestamp, secret));
+}
+
 /**
  * POST /api/messaging/webhooks/receive
  * Receives webhooks from SeloraX platform via Inngest delivery.
@@ -53,20 +57,14 @@ Router.post('/receive', asyncMiddleware(async (req, res) => {
         return res.status(400).send({ message: 'Missing store_id in payload.', status: 400 });
     }
 
-    let signingSecret = await messaging.getWebhookSigningSecret(store_id);
-    if (!signingSecret && process.env.WEBHOOK_SIGNING_SECRET) {
-        signingSecret = process.env.WEBHOOK_SIGNING_SECRET;
-    }
-    if (!signingSecret) {
-        signingSecret = await messaging.ensureWebhookSigningSecret(store_id);
-    }
+    const signingSecrets = await messaging.getWebhookSigningSecrets(store_id, eventTopic);
 
-    if (!signingSecret) {
+    if (!signingSecrets.length) {
         console.warn(`[Webhook] No signing secret available for store ${store_id} (settings row missing).`);
         return res.status(401).send({ message: 'Webhook rejected: store not configured.', status: 401 });
     }
 
-    if (!verifySignature(rawBody, signature, timestamp, signingSecret)) {
+    if (!verifySignatureWithAnySecret(rawBody, signature, timestamp, signingSecrets)) {
         console.warn('[Webhook] Invalid signature for event:', eventTopic);
         return res.status(401).send({ message: 'Invalid webhook signature.', status: 401 });
     }

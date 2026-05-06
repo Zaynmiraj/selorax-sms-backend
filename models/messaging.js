@@ -17,6 +17,15 @@ function generateWebhookSecret() {
     return crypto.randomBytes(16).toString('hex');
 }
 
+function validateDatabaseIdentifier(name) {
+    if (!name || !/^[A-Za-z0-9_]+$/.test(String(name))) return null;
+    return String(name);
+}
+
+function normalizeWebhookSigningSecrets(secrets) {
+    return [...new Set((secrets || []).filter(Boolean).map(String))];
+}
+
 /**
  * Get messaging settings for a store
  * Queries messaging app's own settings table directly by store_id.
@@ -36,6 +45,45 @@ async function getWebhookSigningSecret(store_id) {
         WHERE store_id = ? LIMIT 1
     `, [store_id]);
     return rows[0]?.webhook_signing_secret || null;
+}
+
+/**
+ * Platform fan-out signs each delivery with app_webhook_subscriptions.signing_secret.
+ * Those subscription secrets live in the platform database, so use them as the
+ * authoritative webhook signing secrets for the installed messaging app.
+ */
+async function getPlatformWebhookSigningSecrets(store_id, event_topic) {
+    const platformDatabase = validateDatabaseIdentifier(process.env.PLATFORM_DATABASE);
+    const appId = Number(process.env.SELORAX_APP_ID);
+
+    if (!platformDatabase || !appId || !event_topic) return [];
+
+    try {
+        const [rows] = await connection.promise().query(/*sql*/`
+            SELECT signing_secret
+            FROM \`${platformDatabase}\`.app_webhook_subscriptions
+            WHERE store_id = ?
+              AND app_id = ?
+              AND event_topic = ?
+              AND is_active = 1
+              AND deleted_at IS NULL
+        `, [store_id, appId, event_topic]);
+
+        return normalizeWebhookSigningSecrets(rows.map((row) => row.signing_secret));
+    } catch (err) {
+        console.error('[Webhook] Failed to load platform webhook signing secrets:', err.message);
+        return [];
+    }
+}
+
+async function getWebhookSigningSecrets(store_id, event_topic) {
+    const secrets = await getPlatformWebhookSigningSecrets(store_id, event_topic);
+    const localSecret = await getWebhookSigningSecret(store_id);
+
+    if (localSecret) secrets.push(localSecret);
+    if (process.env.WEBHOOK_SIGNING_SECRET) secrets.push(process.env.WEBHOOK_SIGNING_SECRET);
+
+    return normalizeWebhookSigningSecrets(secrets);
 }
 
 async function ensureWebhookSigningSecret(store_id) {
@@ -330,5 +378,9 @@ module.exports = {
     getLogs,
     getStats,
     getWebhookSigningSecret,
+    getWebhookSigningSecrets,
+    getPlatformWebhookSigningSecrets,
+    normalizeWebhookSigningSecrets,
+    validateDatabaseIdentifier,
     ensureWebhookSigningSecret,
 };
