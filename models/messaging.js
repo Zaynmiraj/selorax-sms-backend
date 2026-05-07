@@ -4,13 +4,16 @@ const { resolveProvider } = require('../services/sms-providers');
 
 const GSM7_REGEX = /^[@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞ ÆæßÉ !"#¤%&'()*+,\-.\/0-9:;<=>?¡A-ZÄÖÑÜa-zäöñüà^{}\\[\\]~|€]*$/;
 
+// Flat billing rule (regardless of GSM-7 vs Unicode):
+//   1–70 chars  → 1 credit
+//   71–140      → 2 credits
+//   141–210     → 3 credits
+//   …           → ceil(length / 70)
+const CHARS_PER_CREDIT = 70;
+
 function calculateSmsParts(message) {
     if (!message) return 1;
-    const isUnicode = !GSM7_REGEX.test(message);
-    const singleLimit = isUnicode ? 70 : 160;
-    const multiLimit = isUnicode ? 67 : 153;
-    const len = message.length;
-    return len <= singleLimit ? 1 : Math.ceil(len / multiLimit);
+    return Math.max(1, Math.ceil(message.length / CHARS_PER_CREDIT));
 }
 
 function generateWebhookSecret() {
