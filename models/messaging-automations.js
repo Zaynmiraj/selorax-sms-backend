@@ -4,6 +4,7 @@ const { connection } = require('../startup/db');
  * Default automation event configs seeded for each store on first access.
  */
 const DEFAULT_AUTOMATIONS = [
+  { event_key: 'order.placed',          event_label: 'Order Placed',          event_group: 'order' },
   { event_key: 'order.confirmed',       event_label: 'Order Confirmed',       event_group: 'order' },
   { event_key: 'order.shipped',         event_label: 'Order Shipped',         event_group: 'order' },
   { event_key: 'order.delivered',       event_label: 'Order Delivered',       event_group: 'order' },
@@ -29,7 +30,14 @@ const WEBHOOK_EVENT_MAP = {
     hold:       'order.cancelled',
     refunded:   'order.refunded',
   },
-  'order.created':    'order.payment_received',
+  // order.created carries the order's initial status. Storefront checkouts
+  // create the order as 'pending' (customer placed it → Order Placed). Orders
+  // created by the merchant in the dashboard are already confirmed/approved,
+  // i.e. 'processing' (→ Order Confirmed). Any other initial status is ignored.
+  'order.created': {
+    pending:    'order.placed',
+    processing: 'order.confirmed',
+  },
   'customer.created': 'customer.welcome',
   'customer.updated': 'customer.updated',
 };
@@ -51,15 +59,20 @@ const TEMPLATE_VARIABLES = {
  * Seed DEFAULT_AUTOMATIONS for a store if none exist yet.
  */
 async function ensureDefaults(store_id, installation_id) {
+  // Seed any default automations the store is missing. Runs on every access so
+  // newly-added defaults (e.g. order.placed) are backfilled to existing stores,
+  // not just stores installing for the first time.
   const [existing] = await connection.promise().query(/*sql*/`
-    SELECT automation_id FROM app_messaging_automations
+    SELECT event_key FROM app_messaging_automations
     WHERE store_id = ?
-    LIMIT 1
   `, [store_id]);
 
-  if (existing.length > 0) return;
+  const existingKeys = new Set(existing.map((r) => r.event_key));
+  const missing = DEFAULT_AUTOMATIONS.filter((d) => !existingKeys.has(d.event_key));
 
-  const rows = DEFAULT_AUTOMATIONS.map(({ event_key, event_label, event_group }) => [
+  if (missing.length === 0) return;
+
+  const rows = missing.map(({ event_key, event_label, event_group }) => [
     store_id, installation_id, event_key, event_label, event_group,
   ]);
 

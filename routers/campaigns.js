@@ -72,6 +72,20 @@ Router.get('/audience/customers', auth, asyncMiddleware(async (req, res) => {
     }
 }));
 
+// GET /api/messaging/campaigns/audience/segments — list the store's saved
+// customer segments (created in the SeloraX dashboard) so they can be targeted.
+Router.get('/audience/segments', auth, asyncMiddleware(async (req, res) => {
+    try {
+        const result = await platformApi.get(req.user.store_id, '/apps/v1/customer-segments');
+        return res.send({ message: 'Segments fetched.', data: result?.data || [], status: 200 });
+    } catch (err) {
+        // read:orders/read:customers scope or platform unavailable — return empty
+        // so the campaign builder still works with other audience types.
+        console.warn(`[Campaigns] segment list failed for store ${req.user.store_id}: ${err.message}`);
+        return res.status(502).send({ message: 'Failed to fetch segments.', data: [], status: 502 });
+    }
+}));
+
 // GET /api/messaging/campaigns/:campaign_id — detail
 Router.get('/:campaign_id', auth, asyncMiddleware(async (req, res) => {
     const campaign = await campaigns.getById(Number(req.params.campaign_id), req.user.store_id);
@@ -88,12 +102,34 @@ Router.get('/:campaign_id', auth, asyncMiddleware(async (req, res) => {
 
 // POST /api/messaging/campaigns — create
 Router.post('/', auth, asyncMiddleware(async (req, res) => {
-    const { name, message, audience_type, phones, filters, scheduled_at } = req.body;
+    const { name, message, audience_type, phones, filters, segment_id, segment_name, scheduled_at } = req.body;
     if (!name || !message) return res.status(400).send({ message: 'name and message are required.', status: 400 });
 
     let phoneList = [];
 
-    if (audience_type === 'manual' || audience_type === 'csv') {
+    if (audience_type === 'segment') {
+        if (!segment_id) {
+            return res.status(400).send({ message: 'segment_id is required for segment audience.', status: 400 });
+        }
+        try {
+            const result = await platformApi.get(
+                req.user.store_id,
+                `/apps/v1/customer-segments/${segment_id}/customers`,
+                { limit: 10000 },
+            );
+            const customers = result?.data || [];
+            phoneList = customers
+                .map(c => (c.phone || c.customer_phone || '').toString().replace(/[\s\-()]+/g, ''))
+                .filter(p => BD_PHONE_REGEX.test(p));
+        } catch (err) {
+            const status = err.status === 404 ? 404 : 502;
+            return res.status(status).send({
+                message: status === 404 ? 'Segment not found.' : 'Failed to fetch segment customers from platform.',
+                status,
+            });
+        }
+        if (phoneList.length === 0) return res.status(400).send({ message: 'No customers matched this segment.', status: 400 });
+    } else if (audience_type === 'manual' || audience_type === 'csv') {
         if (!Array.isArray(phones) || phones.length === 0) {
             return res.status(400).send({ message: 'phones array is required for manual audience.', status: 400 });
         }
@@ -129,7 +165,10 @@ Router.post('/', auth, asyncMiddleware(async (req, res) => {
 
     const campaign = await campaigns.create(req.user.store_id, req.installation.installation_id, {
         name, message, audience_type,
-        audience_data: audience_type === 'filter' ? filters : { count: phoneList.length },
+        audience_data:
+            audience_type === 'filter' ? filters
+            : audience_type === 'segment' ? { segment_id, segment_name: segment_name || null, count: phoneList.length }
+            : { count: phoneList.length },
         scheduled_at,
     });
 

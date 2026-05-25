@@ -6,6 +6,7 @@ const messaging = require('../models/messaging');
 const automations = require('../models/messaging-automations');
 const { connection } = require('../startup/db');
 const scheduler = require('../services/scheduler');
+const platformApi = require('../services/platform-api');
 
 /**
  * Verify HMAC-SHA256 webhook signature.
@@ -83,7 +84,35 @@ Router.post('/receive', asyncMiddleware(async (req, res) => {
     }
 
     // Resolve event key using automations model
-    const order = data || {};
+    let order = data || {};
+
+    // The platform emits `order.created` (storefront checkout & merchant-created
+    // orders) with NO customer phone and — for storefront — no status, and it
+    // only enriches `order.status_changed` payloads. So for order.created we
+    // fetch the full order from the platform to get the phone AND the initial
+    // status (pending = customer placed → Order Placed; processing = merchant
+    // confirmed → Order Confirmed). Fails soft: if the fetch errors (e.g. the
+    // install lacks the read:orders scope) we fall through and skip below.
+    if (eventTopic === 'order.created' && !(order.customer_phone || order.phone)) {
+        const lookupId = order.order_id || order.id;
+        if (lookupId) {
+            try {
+                const resp = await platformApi.get(store_id, `/apps/v1/orders/${lookupId}`);
+                const fetched = resp && resp.data;
+                if (fetched) {
+                    order = {
+                        ...order,
+                        ...fetched,
+                        order_number: fetched.store_serial_order_no || fetched.order_number || order.order_number,
+                        total: fetched.grand_total || fetched.total || order.grand_total || order.total,
+                    };
+                }
+            } catch (err) {
+                console.warn(`[Webhook] order.created enrichment failed for order ${lookupId} store ${store_id}: ${err.message}`);
+            }
+        }
+    }
+
     const orderStatus = order.status || order.order_status;
     const eventKey = automations.resolveEventKey(eventTopic, orderStatus);
 
