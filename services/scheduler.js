@@ -34,6 +34,20 @@ async function cancelJobsForOrder(store_id, resource_id) {
 }
 
 /**
+ * Cancel pending jobs for a specific (order, event) pair. Used to cancel a queued
+ * payment-recovery SMS when the buyer later pays — without touching other queued
+ * SMS for the same order (e.g. Order Shipped that's legitimately pending).
+ */
+async function cancelJobsForOrderAndEvent(store_id, resource_id, event_topic) {
+    const [result] = await connection.promise().query(/*sql*/`
+        UPDATE app_messaging_scheduled
+        SET status = 'cancelled', processed_at = NOW()
+        WHERE store_id = ? AND resource_id = ? AND event_topic = ? AND status = 'pending'
+    `, [store_id, resource_id, event_topic]);
+    return result.affectedRows;
+}
+
+/**
  * Cancel all pending jobs for a store (e.g., on app uninstall)
  */
 async function cancelAllForStore(store_id) {
@@ -244,6 +258,7 @@ function stop() {
 module.exports = {
     scheduleJob,
     cancelJobsForOrder,
+    cancelJobsForOrderAndEvent,
     cancelAllForStore,
     getScheduledJobs,
     processDueJobs,

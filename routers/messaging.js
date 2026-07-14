@@ -133,6 +133,161 @@ Router.get('/logs', auth, asyncMiddleware(async (req, res) => {
 }));
 
 /**
+ * POST /api/messaging/logs/:log_id/retry
+ * Retry a failed SMS. Body: { scheduled_at?: ISO string }
+ *   - no scheduled_at → send immediately (bills 1 SMS credit like any send)
+ *   - scheduled_at    → queue on the scheduler for future delivery
+ *
+ * Only allowed when the log's status is 'failed' — retrying already-sent messages
+ * would double-charge the buyer, and retrying pending/scheduled ones is meaningless.
+ * Cross-store guard via getLogById scoping.
+ */
+Router.post('/logs/:log_id/retry', auth, asyncMiddleware(async (req, res) => {
+    const log = await messaging.getLogById(req.user.store_id, req.params.log_id);
+    if (!log) return res.status(404).send({ message: 'Log not found.', status: 404, code: 'not_found' });
+    if (log.status !== 'failed') {
+        return res.status(400).send({
+            message: `Cannot retry a log with status '${log.status}' — only failed logs can be retried.`,
+            status: 400, code: 'not_retryable',
+        });
+    }
+
+    const { scheduled_at } = req.body || {};
+    const scheduledDate = scheduled_at ? new Date(scheduled_at) : null;
+    if (scheduled_at && (isNaN(scheduledDate.getTime()) || scheduledDate <= new Date())) {
+        return res.status(400).send({
+            message: 'scheduled_at must be a valid ISO datetime in the future.',
+            status: 400, code: 'invalid_scheduled_at',
+        });
+    }
+
+    // Schedule path — defers billing until the scheduler actually sends the SMS
+    // (matches the existing scheduled-automation flow — no credit deducted until send).
+    if (scheduledDate) {
+        const scheduler = require('../services/scheduler');
+        const jobId = await scheduler.scheduleJob(
+            log.store_id, log.installation_id, log.phone, log.message, scheduledDate,
+            { event_topic: log.event_topic, resource_id: log.resource_id },
+        );
+        return res.send({
+            message: 'Retry scheduled.',
+            data: { retry_type: 'scheduled', job_id: jobId, scheduled_at: scheduledDate.toISOString(), log_id: log.log_id },
+            status: 200,
+        });
+    }
+
+    // Immediate path — sendSms handles the credit check + debit + new log row insert.
+    const result = await messaging.sendSms(
+        log.store_id, log.installation_id, log.phone, log.message,
+        {
+            event_topic: log.event_topic || 'manual.retry',
+            resource_id: log.resource_id,
+            source_app: 'retry',
+            metadata: { retried_from_log_id: log.log_id },
+        },
+    );
+
+    if (!result.success && result.error === 'insufficient_balance') {
+        return res.status(402).send({
+            message: 'No SMS credits remaining. Please buy a package.',
+            code: 'insufficient_balance',
+            sms_credits: result.sms_credits,
+            status: 402,
+        });
+    }
+
+    res.status(result.success ? 200 : 500).send({
+        message: result.success ? 'SMS retried.' : 'Retry failed.',
+        data: { retry_type: 'immediate', ...result, retried_from_log_id: log.log_id },
+        status: result.success ? 200 : 500,
+    });
+}));
+
+/**
+ * POST /api/messaging/logs/retry-bulk
+ * Body: { log_ids: number[], scheduled_at?: ISO string }
+ *
+ * Retries every valid failed log in one call. Returns a per-id result summary so
+ * the UI can toast e.g. "12 retried, 1 skipped (already sent), 2 insufficient credit".
+ * Loops through candidates — a mid-batch credit exhaustion stops the immediate path
+ * (later items report insufficient_balance), but scheduled retries queue regardless.
+ */
+Router.post('/logs/retry-bulk', auth, asyncMiddleware(async (req, res) => {
+    const { log_ids, scheduled_at } = req.body || {};
+    if (!Array.isArray(log_ids) || !log_ids.length) {
+        return res.status(400).send({ message: 'log_ids array is required.', status: 400 });
+    }
+    if (log_ids.length > 200) {
+        return res.status(400).send({ message: 'Max 200 log_ids per bulk retry call.', status: 400, code: 'batch_too_large' });
+    }
+
+    const scheduledDate = scheduled_at ? new Date(scheduled_at) : null;
+    if (scheduled_at && (isNaN(scheduledDate.getTime()) || scheduledDate <= new Date())) {
+        return res.status(400).send({ message: 'scheduled_at must be a valid ISO datetime in the future.', status: 400, code: 'invalid_scheduled_at' });
+    }
+
+    const logs = await messaging.getFailedLogsByIds(req.user.store_id, log_ids);
+    const results = { retried: 0, scheduled: 0, skipped: 0, insufficient: 0, failed: 0, items: [] };
+
+    const scheduler = scheduledDate ? require('../services/scheduler') : null;
+
+    for (const inputId of log_ids) {
+        const log = logs.find((l) => l.log_id === Number(inputId));
+        if (!log) {
+            results.skipped++;
+            results.items.push({ log_id: Number(inputId), outcome: 'skipped', reason: 'not_failed_or_not_found' });
+            continue;
+        }
+
+        if (scheduledDate) {
+            try {
+                const jobId = await scheduler.scheduleJob(
+                    log.store_id, log.installation_id, log.phone, log.message, scheduledDate,
+                    { event_topic: log.event_topic, resource_id: log.resource_id },
+                );
+                results.scheduled++;
+                results.items.push({ log_id: log.log_id, outcome: 'scheduled', job_id: jobId });
+            } catch (err) {
+                results.failed++;
+                results.items.push({ log_id: log.log_id, outcome: 'failed', error: err.message });
+            }
+            continue;
+        }
+
+        try {
+            const result = await messaging.sendSms(
+                log.store_id, log.installation_id, log.phone, log.message,
+                {
+                    event_topic: log.event_topic || 'manual.retry',
+                    resource_id: log.resource_id,
+                    source_app: 'retry-bulk',
+                    metadata: { retried_from_log_id: log.log_id },
+                },
+            );
+            if (result.success) {
+                results.retried++;
+                results.items.push({ log_id: log.log_id, outcome: 'retried', new_log_id: result.log_id });
+            } else if (result.error === 'insufficient_balance') {
+                results.insufficient++;
+                results.items.push({ log_id: log.log_id, outcome: 'insufficient_balance' });
+            } else {
+                results.failed++;
+                results.items.push({ log_id: log.log_id, outcome: 'failed', error: result.error || 'send_failed' });
+            }
+        } catch (err) {
+            results.failed++;
+            results.items.push({ log_id: log.log_id, outcome: 'failed', error: err.message });
+        }
+    }
+
+    res.send({
+        message: `Bulk retry complete: ${results.retried} sent, ${results.scheduled} scheduled, ${results.skipped} skipped, ${results.insufficient} out of credit, ${results.failed} failed.`,
+        data: results,
+        status: 200,
+    });
+}));
+
+/**
  * GET /api/messaging/stats
  * Get messaging dashboard stats
  */

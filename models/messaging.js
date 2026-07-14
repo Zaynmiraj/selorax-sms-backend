@@ -359,6 +359,33 @@ async function getLogs(store_id, { page = 1, limit = 20, status, phone, event_to
 }
 
 /**
+ * Fetch a single log row scoped to the store. Returns null when not found or
+ * cross-store — never trust the caller-supplied log_id without the store guard.
+ */
+async function getLogById(store_id, log_id) {
+    const [rows] = await connection.promise().query(/*sql*/`
+        SELECT * FROM app_messaging_logs WHERE log_id = ? AND store_id = ? LIMIT 1
+    `, [Number(log_id), store_id]);
+    return rows[0] || null;
+}
+
+/**
+ * Fetch multiple failed logs by id, scoped to the store. Used by bulk retry so
+ * one query handles the whole batch.
+ */
+async function getFailedLogsByIds(store_id, log_ids) {
+    if (!Array.isArray(log_ids) || !log_ids.length) return [];
+    const ids = log_ids.map((n) => Number(n)).filter((n) => Number.isFinite(n) && n > 0);
+    if (!ids.length) return [];
+    const placeholders = ids.map(() => '?').join(',');
+    const [rows] = await connection.promise().query(/*sql*/`
+        SELECT * FROM app_messaging_logs
+        WHERE store_id = ? AND log_id IN (${placeholders}) AND status = 'failed'
+    `, [store_id, ...ids]);
+    return rows;
+}
+
+/**
  * Get stats for the messaging dashboard
  */
 async function getStats(store_id) {
@@ -397,6 +424,8 @@ module.exports = {
     calculateSmsParts,
     sendSms,
     getLogs,
+    getLogById,
+    getFailedLogsByIds,
     getStats,
     getWebhookSigningSecret,
     getWebhookSigningSecrets,

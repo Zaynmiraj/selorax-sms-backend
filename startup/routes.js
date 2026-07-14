@@ -41,6 +41,11 @@ module.exports = function (app) {
     // Webhook receiver (called by SeloraX platform)
     app.use('/api/messaging/webhooks', require('../routers/webhooks'));
 
+    // Internal platform-to-platform endpoints (X-Internal-Secret auth). Used by
+    // SeloraX-Backend to bill this app's SMS credit pool for merchant-triggered sends
+    // (pay-link Send SMS button), so merchants top up in one place.
+    app.use('/api/messaging/internal', require('../routers/internal'));
+
     // Global error handler
     app.use(require('../middlewares/error'));
 };

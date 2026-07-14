@@ -13,6 +13,11 @@ const DEFAULT_AUTOMATIONS = [
   { event_key: 'order.payment_received', event_label: 'Payment Received',     event_group: 'order' },
   { event_key: 'customer.welcome',      event_label: 'New Customer Welcome',  event_group: 'customer' },
   { event_key: 'customer.updated',      event_label: 'Customer Updated',      event_group: 'customer' },
+  // Payment recovery: fires when a buyer's online payment attempt hits a terminal
+  // failure (failed/expired/cancelled) and the order still owes money. Template can
+  // include {{pay_link}} so the buyer can retry from the SMS. Backfilled to existing
+  // stores via ensureDefaults() — no schema migration needed.
+  { event_key: 'order.payment_recovery', event_label: 'Payment Recovery',     event_group: 'payment' },
 ];
 
 /**
@@ -40,6 +45,11 @@ const WEBHOOK_EVENT_MAP = {
   },
   'customer.created': 'customer.welcome',
   'customer.updated': 'customer.updated',
+  // Payment recovery: platform fires this when a payment_transactions row moves to
+  // a terminal-failed state (failed/expired/cancelled) and the order is still unpaid.
+  // The event payload carries pay_link_url + outstanding_amount so the SMS template
+  // can offer the buyer a retry link.
+  'payment.retry_needed': 'order.payment_recovery',
 };
 
 /**
@@ -52,6 +62,10 @@ const TEMPLATE_VARIABLES = {
   ],
   customer: [
     'customer_name', 'customer_phone', 'customer_email', 'store_name',
+  ],
+  payment: [
+    'order_id', 'order_number', 'customer_name', 'customer_phone',
+    'outstanding_amount', 'grand_total', 'gateway', 'pay_link', 'store_name',
   ],
 };
 

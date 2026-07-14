@@ -77,6 +77,24 @@ Router.post('/receive', asyncMiddleware(async (req, res) => {
     // HMAC signature already proves the webhook came from the platform.
     // No need to look up app_installations — use store_id directly.
 
+    // Side-effect-only branch: order.paid isn't itself an SMS trigger. It's the signal we
+    // use to cancel any queued payment-recovery SMS for this order — the buyer completed
+    // payment, so a delayed "please retry" text is no longer wanted. Runs before the
+    // auto-sms-enabled check on purpose: cancelling stale queued jobs is bookkeeping the
+    // messaging app should always do, regardless of the merchant's auto-SMS toggle.
+    if (eventTopic === 'order.paid') {
+        const paidOrderId = data?.order_id;
+        if (paidOrderId) {
+            const cancelled = await scheduler.cancelJobsForOrderAndEvent(
+                store_id, String(paidOrderId), 'order.payment_recovery',
+            );
+            if (cancelled > 0) {
+                console.log(`[Webhook] order.paid → cancelled ${cancelled} queued recovery SMS for order ${paidOrderId}`);
+            }
+        }
+        return res.status(200).send({ message: 'order.paid processed (recovery jobs cancelled).', status: 200 });
+    }
+
     // Check if auto-SMS is enabled
     const settings = await messaging.getSettings(store_id);
     if (!settings || !settings.is_enabled || !settings.auto_sms_enabled) {
@@ -160,7 +178,12 @@ Router.post('/receive', asyncMiddleware(async (req, res) => {
         return res.status(200).send({ message: 'Duplicate event — SMS already sent.', status: 200 });
     }
 
-    // Render automation template with order variables
+    // Render automation template with order variables. Payment-recovery events
+    // (event_group='payment') carry a few extra fields the platform enriches into
+    // the payload — pay_link_url / outstanding_amount / gateway_code — which we
+    // expose as {{pay_link}} / {{outstanding_amount}} / {{gateway}}. Non-payment
+    // events don't populate these, so they render as empty strings and don't
+    // break existing templates.
     const variables = {
         order_id: order.order_id || order.id || '',
         order_number: order.order_number || order.order_id || '',
@@ -170,6 +193,10 @@ Router.post('/receive', asyncMiddleware(async (req, res) => {
         status: order.status || order.order_status || '',
         tracking_id: order.tracking_id || order.tracking_number || '',
         store_name: order.store_name || '',
+        pay_link: order.pay_link_url || order.pay_link || '',
+        outstanding_amount: order.outstanding_amount != null ? String(order.outstanding_amount) : '',
+        grand_total: order.grand_total != null ? String(order.grand_total) : (order.total != null ? String(order.total) : ''),
+        gateway: order.gateway_code || order.gateway || '',
     };
 
     const renderedMessage = messaging.renderTemplate(automation.template_text, variables);
