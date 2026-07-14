@@ -355,6 +355,43 @@ async function getLogs(store_id, { page = 1, limit = 20, status, phone, event_to
         SELECT COUNT(*) as total FROM app_messaging_logs ${where}
     `, params);
 
+    // Annotate failed rows with the id of any later log that retried them (single
+    // targeted query per page). The retry writes `metadata.retried_from_log_id` into
+    // provider_response.meta.metadata (see sendSms enrichment + retry route). This
+    // lets the frontend hide the Retry button on rows that have already been
+    // retried and show a "retried" indicator instead — no more double-retries.
+    const failedIds = rows.filter((r) => r.status === 'failed').map((r) => r.log_id);
+    if (failedIds.length) {
+        const placeholders = failedIds.map(() => '?').join(',');
+        const [retryRows] = await connection.promise().query(/*sql*/`
+            SELECT log_id, created_at, status,
+                   JSON_UNQUOTE(JSON_EXTRACT(provider_response, '$.meta.metadata.retried_from_log_id')) AS from_id
+            FROM app_messaging_logs
+            WHERE store_id = ?
+              AND JSON_UNQUOTE(JSON_EXTRACT(provider_response, '$.meta.metadata.retried_from_log_id')) IN (${placeholders})
+        `, [store_id, ...failedIds]);
+
+        const retryMap = new Map();
+        for (const r of retryRows) {
+            const fromId = Number(r.from_id);
+            if (!Number.isFinite(fromId)) continue;
+            const existing = retryMap.get(fromId);
+            // Keep the LATEST retry per source log — a retry that failed then a retry that succeeded
+            // should show the successful one.
+            if (!existing || new Date(r.created_at) > new Date(existing.created_at)) {
+                retryMap.set(fromId, { log_id: r.log_id, status: r.status, created_at: r.created_at });
+            }
+        }
+        for (const row of rows) {
+            const hit = retryMap.get(row.log_id);
+            if (hit) {
+                row.retried_by_log_id = hit.log_id;
+                row.retried_at = hit.created_at;
+                row.retried_status = hit.status;
+            }
+        }
+    }
+
     return { logs: rows, total: countRows[0].total, page, limit };
 }
 
