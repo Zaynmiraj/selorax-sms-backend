@@ -49,6 +49,11 @@ module.exports = function (app) {
     // (pay-link Send SMS button), so merchants top up in one place.
     app.use('/api/messaging/internal', require('../routers/internal'));
 
+    // Admin panel API (owner-facing). Own cookie auth (smsAdminAuth) + own identity
+    // table — fully separate from the per-store session-token auth above, so it does
+    // not affect the embedded app or any customer flow.
+    app.use('/api/admin', require('../routers/admin'));
+
     // Global error handler
     app.use(require('../middlewares/error'));
 };
