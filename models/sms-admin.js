@@ -6,6 +6,7 @@
  * OTPs are sent via the provider directly (no store credits, no billing/logs).
  */
 const crypto = require('crypto');
+const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { connection } = require('../startup/db');
 const { normalizeBd, redactSecrets } = require('../services/sms-providers/anbernet');
@@ -63,6 +64,7 @@ function publicAdmin(row) {
         phone: row.phone,
         role: row.role,
         is_active: !!row.is_active,
+        has_password: !!row.password_hash,
         last_login: row.last_login,
         created_at: row.created_at,
     };
@@ -169,6 +171,34 @@ async function verifyOtp(phone, otp) {
     return { admin: publicAdmin({ ...admin, last_login: new Date() }), token };
 }
 
+async function verifyPassword(phone, password) {
+    const admin = await findByPhone(phone);
+    if (!admin) { const e = new Error('No admin account for this phone.'); e.code = 'admin_not_found'; throw e; }
+    if (!admin.is_active) { const e = new Error('This admin account is disabled.'); e.code = 'admin_disabled'; throw e; }
+    if (!admin.password_hash) { const e = new Error('No password set.'); e.code = 'no_password'; throw e; }
+
+    const isValid = await bcrypt.compare(password, admin.password_hash);
+    if (!isValid) { const e = new Error('Incorrect password.'); e.code = 'invalid_password'; throw e; }
+
+    await db.query(`UPDATE sms_admins SET last_login = NOW() WHERE admin_id = ?`, [admin.admin_id]);
+
+    const token = jwt.sign(
+        { admin_id: admin.admin_id, role: admin.role, phone: admin.phone, isSmsAdmin: true },
+        jwtSecret(),
+        { expiresIn: TOKEN_TTL }
+    );
+    return { admin: publicAdmin({ ...admin, last_login: new Date() }), token };
+}
+
+async function setPassword(admin_id, password) {
+    if (!password || password.length < 6) {
+        const e = new Error('Password must be at least 6 characters.'); e.code = 'invalid_password_length'; throw e;
+    }
+    const hash = await bcrypt.hash(password, 10);
+    await db.query(`UPDATE sms_admins SET password_hash = ? WHERE admin_id = ?`, [hash, admin_id]);
+    return publicAdmin(await findById(admin_id));
+}
+
 function verifyToken(token) {
     return jwt.verify(token, jwtSecret());
 }
@@ -263,6 +293,8 @@ module.exports = {
     publicAdmin,
     requestOtp,
     verifyOtp,
+    verifyPassword,
+    setPassword,
     verifyToken,
     logAdminSms,
     listAdminLogs,

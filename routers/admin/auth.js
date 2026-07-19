@@ -28,13 +28,34 @@ function setAuthCookie(res, token) {
 const otpLimiter = rateLimit({ windowMs: 60 * 1000, max: 5, message: { message: 'Too many OTP requests. Wait a minute.', status: 429 } });
 const verifyLimiter = rateLimit({ windowMs: 60 * 1000, max: 15, message: { message: 'Too many attempts. Wait a minute.', status: 429 } });
 
-// POST /api/admin/auth/login  { phone }  → sends OTP
+// POST /api/admin/auth/login  { phone }  → determines next step
 Router.post('/login', otpLimiter, asyncMiddleware(async (req, res) => {
     const { phone } = req.body || {};
     if (!phone) return res.status(400).send({ message: 'Phone is required.', status: 400, code: 'missing_field' });
     try {
+        const admin = await smsAdmin.findByPhone(phone);
+        if (!admin) { const e = new Error('No admin account for this phone.'); e.code = 'admin_not_found'; throw e; }
+        if (!admin.is_active) { const e = new Error('This admin account is disabled.'); e.code = 'admin_disabled'; throw e; }
+
+        if (admin.password_hash) {
+            return res.send({ message: 'Password required.', status: 200, step: 'password' });
+        } else {
+            await smsAdmin.requestOtp(phone);
+            return res.send({ message: 'OTP sent.', status: 200, step: 'otp' });
+        }
+    } catch (e) {
+        const map = { admin_not_found: 404, admin_disabled: 403, otp_send_failed: 502 };
+        return res.status(map[e.code] || 400).send({ message: e.message, status: map[e.code] || 400, code: e.code || 'error' });
+    }
+}));
+
+// POST /api/admin/auth/forgot-password { phone } -> forces OTP send
+Router.post('/forgot-password', otpLimiter, asyncMiddleware(async (req, res) => {
+    const { phone } = req.body || {};
+    if (!phone) return res.status(400).send({ message: 'Phone is required.', status: 400, code: 'missing_field' });
+    try {
         await smsAdmin.requestOtp(phone);
-        return res.send({ message: 'OTP sent.', status: 200 });
+        return res.send({ message: 'OTP sent.', status: 200, step: 'otp' });
     } catch (e) {
         const map = { admin_not_found: 404, admin_disabled: 403, otp_send_failed: 502 };
         return res.status(map[e.code] || 400).send({ message: e.message, status: map[e.code] || 400, code: e.code || 'error' });
@@ -52,6 +73,33 @@ Router.post('/verify-otp', verifyLimiter, asyncMiddleware(async (req, res) => {
         return res.send({ message: 'Logged in.', status: 200, admin, access_token: token });
     } catch (e) {
         const map = { admin_not_found: 404, admin_disabled: 403, otp_not_requested: 400, otp_expired: 401, otp_invalid: 401 };
+        return res.status(map[e.code] || 400).send({ message: e.message, status: map[e.code] || 400, code: e.code || 'error' });
+    }
+}));
+
+// POST /api/admin/auth/login-with-password  { phone, password }
+Router.post('/login-with-password', verifyLimiter, asyncMiddleware(async (req, res) => {
+    const { phone, password } = req.body || {};
+    if (!phone || !password) return res.status(400).send({ message: 'Phone and password are required.', status: 400, code: 'missing_field' });
+    try {
+        const { admin, token } = await smsAdmin.verifyPassword(phone, password);
+        setAuthCookie(res, token);
+        return res.send({ message: 'Logged in.', status: 200, admin, access_token: token });
+    } catch (e) {
+        const map = { admin_not_found: 404, admin_disabled: 403, no_password: 400, invalid_password: 401 };
+        return res.status(map[e.code] || 400).send({ message: e.message, status: map[e.code] || 400, code: e.code || 'error' });
+    }
+}));
+
+// POST /api/admin/auth/set-password  { password } -> sets password for logged in admin
+Router.post('/set-password', smsAdminAuth, asyncMiddleware(async (req, res) => {
+    const { password } = req.body || {};
+    if (!password) return res.status(400).send({ message: 'Password is required.', status: 400, code: 'missing_field' });
+    try {
+        const admin = await smsAdmin.setPassword(req.admin.admin_id, password);
+        return res.send({ message: 'Password set successfully.', status: 200, admin });
+    } catch (e) {
+        const map = { invalid_password_length: 400 };
         return res.status(map[e.code] || 400).send({ message: e.message, status: map[e.code] || 400, code: e.code || 'error' });
     }
 }));
