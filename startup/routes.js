@@ -35,6 +35,9 @@ module.exports = function (app) {
     app.use('/api/messaging/automations', require('../routers/automations'));
     app.use('/api/messaging/campaigns', require('../routers/campaigns'));
 
+    // Dashboard extension endpoints (proxied by the platform's /apps/extensions/action)
+    app.use('/api/messaging/extensions', require('../routers/extensions'));
+
     // OAuth token receiver (called by SeloraX platform on install/uninstall)
     app.use('/api/messaging/oauth', require('../routers/oauth'));
 

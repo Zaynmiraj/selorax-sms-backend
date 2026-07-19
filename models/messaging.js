@@ -262,8 +262,9 @@ async function sendSms(store_id, installation_id, phone, message, { event_topic,
     const settings = await getSettings(store_id);
     const provider = resolveProvider(settings);
 
-    // Send SMS
-    const result = await provider.sendSms(phone, message);
+    // Send SMS. event_topic lets the provider distinguish transactional from
+    // promotional traffic (Anbernet maps it to transtype T vs P).
+    const result = await provider.sendSms(phone, message, { event_topic });
     const enrichedProviderResponse = {
         ...(result.provider_response || {}),
         meta: {
