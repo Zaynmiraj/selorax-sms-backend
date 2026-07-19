@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const { connection } = require('../startup/db');
 const { resolveProvider } = require('../services/sms-providers');
+const senderCatalog = require('./sms-sender-ids');
 
 const GSM7_REGEX = /^[@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞ ÆæßÉ !"#¤%&'()*+,\-.\/0-9:;<=>?¡A-ZÄÖÑÜa-zäöñüà^{}\\[\\]~|€]*$/;
 
@@ -39,7 +40,20 @@ async function getSettings(store_id) {
         WHERE store_id = ?
         LIMIT 1
     `, [store_id]);
-    return rows[0] || null;
+    const row = rows[0] || null;
+
+    // Additive global-default fallback for the sender ID. Only fills in when the
+    // store has no explicit assignment; when no global default is set this is a
+    // no-op and resolveProvider() still backstops with env SMS_API_SENDER_ID.
+    // getGlobalDefault() is cached, so this stays cheap on the send hot path and
+    // can never throw (a catalog problem must not break sending).
+    if (row && (!row.sender_id || String(row.sender_id).trim() === '')) {
+        try {
+            const globalDefault = await senderCatalog.getGlobalDefault();
+            if (globalDefault) row.sender_id = globalDefault;
+        } catch (e) { /* leave sender_id as-is; env fallback applies downstream */ }
+    }
+    return row;
 }
 
 async function getWebhookSigningSecret(store_id) {

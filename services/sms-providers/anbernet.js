@@ -352,6 +352,7 @@ class AnbernetProvider {
 
 module.exports = AnbernetProvider;
 module.exports.normalizeBd = normalizeBd;
+module.exports.senderIdError = senderIdError;
 module.exports.classifyResponse = classifyResponse;
 module.exports.redactSecrets = redactSecrets;
 module.exports.resetCircuit = resetCircuit;
