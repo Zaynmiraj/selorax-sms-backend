@@ -14,6 +14,7 @@ Router.use('/auth', require('./auth'));
 
 // Everything below requires an authenticated admin.
 Router.use(smsAdminAuth);
+Router.use('/dashboard', require('./dashboard'));
 Router.use('/sender-ids', require('./sender-ids'));
 Router.use('/stores', require('./stores'));
 Router.use('/logs', require('./logs'));

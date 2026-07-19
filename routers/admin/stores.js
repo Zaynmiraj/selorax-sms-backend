@@ -59,6 +59,39 @@ Router.get('/', asyncMiddleware(async (req, res) => {
     return res.send({ status: 200, stores, global_default: globalDefault || null });
 }));
 
+// GET /api/admin/stores/:storeId
+Router.get('/:storeId', asyncMiddleware(async (req, res) => {
+    const storeId = Number(req.params.storeId);
+    if (!storeId) return res.status(400).send({ message: 'Invalid store id.', status: 400 });
+
+    const [rows] = await db.query(`
+        SELECT store_id, sender_id, sms_credits, is_enabled, auto_sms_enabled
+        FROM app_messaging_settings
+        WHERE store_id = ?
+    `, [storeId]);
+    if (rows.length === 0) return res.status(404).send({ message: 'Store not found.', status: 404 });
+
+    const globalDefault = await catalog.getGlobalDefault();
+    const names = await enrichNames([storeId]);
+
+    const r = rows[0];
+    const store = {
+        store_id: r.store_id,
+        name: names[r.store_id]?.name || null,
+        domain: names[r.store_id]?.domain || null,
+        sms_credits: Number(r.sms_credits) || 0,
+        is_enabled: !!r.is_enabled,
+        auto_sms_enabled: !!r.auto_sms_enabled,
+        assigned_sender_id: r.sender_id || null,
+        effective_sender_id: r.sender_id || globalDefault || process.env.SMS_API_SENDER_ID || null,
+    };
+
+    const [smsRows] = await db.query(`SELECT COUNT(*) as c FROM app_messaging_logs WHERE store_id = ? AND status = 'sent'`, [storeId]);
+    store.sms_sent_total = Number(smsRows[0]?.c) || 0;
+
+    return res.send({ status: 200, store, global_default: globalDefault || null });
+}));
+
 // PATCH /api/admin/stores/:storeId/sender-id  { value }  (empty/null clears the assignment)
 Router.patch('/:storeId/sender-id', asyncMiddleware(async (req, res) => {
     const storeId = Number(req.params.storeId);
