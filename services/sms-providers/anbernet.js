@@ -140,8 +140,12 @@ function classifyResponse(httpStatus, body) {
 
     // Documented but never observed in any example response — treated as advisory.
     const code = body && (body.code ?? body.status_code);
-    if (code === 1001) return { success: false, fatal: true, reason: 'auth_failed' };
-    if (code === 1002) return { success: false, fatal: true, reason: 'insufficient_vendor_balance' };
+    const numericCode = Number(code);
+    if (numericCode === 1001) return { success: false, fatal: true, reason: 'auth_failed' };
+    if (numericCode === 1002) return { success: false, fatal: true, reason: 'insufficient_vendor_balance' };
+    if (numericCode === 1003) {
+        return { success: false, fatal: false, reason: 'invalid_sender_id', senderIdRejected: true };
+    }
 
     if (body && body.status === 'success') {
         return { success: true, fatal: false, reason: null };
@@ -288,6 +292,7 @@ class AnbernetProvider {
                 transtype,
                 receiver,
                 ...(verdict.reason ? { error: verdict.reason } : {}),
+                ...(verdict.senderIdRejected ? { sender_id_rejected: true } : {}),
                 ...redactSecrets(body),
             },
         };

@@ -45,7 +45,7 @@ Router.get('/store', asyncMiddleware(async (req, res) => {
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
     const [rows] = await db.query(/*sql*/`
-        SELECT log_id, store_id, phone, message, event_topic, resource_id, status, created_at
+        SELECT log_id, store_id, phone, message, event_topic, resource_id, status, provider_response, created_at
         FROM app_messaging_logs
         ${whereSql}
         ORDER BY created_at DESC, log_id DESC
@@ -58,7 +58,18 @@ Router.get('/store', asyncMiddleware(async (req, res) => {
 
     return res.send({
         status: 200,
-        logs: page.map(r => ({ ...r, store_name: names[r.store_id] || null })),
+        logs: page.map((r) => {
+            let providerResponse = r.provider_response;
+            if (typeof providerResponse === 'string') {
+                try { providerResponse = JSON.parse(providerResponse); } catch { providerResponse = null; }
+            }
+            const senderAttempts = providerResponse?.meta?.sender_attempts;
+            return {
+                ...r,
+                provider_response: Array.isArray(senderAttempts) ? { meta: { sender_attempts: senderAttempts } } : null,
+                store_name: names[r.store_id] || null,
+            };
+        }),
         has_more: hasMore,
         offset,
         limit,
