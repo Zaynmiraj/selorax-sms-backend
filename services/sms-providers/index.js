@@ -24,15 +24,15 @@ const AnbernetProvider = require('./anbernet');
  * Resolve the SMS provider for a store.
  * @param {object|null} settings row from app_messaging_settings (SELECT *)
  */
-function resolveProvider(settings) {
+function resolveProvider(settings, senderId) {
     return new AnbernetProvider({
         baseUrl: process.env.SMS_API_ENDPOINT,
         account: process.env.SMS_API_ACCOUNT,
         apiKey: process.env.SMS_API_KEY,
         password: process.env.SMS_API_PASSWORD,
-        // Per-store sender ID wins, global default backs it. settings.sender_id is
-        // what the admin panel will write per store; empty everywhere today.
-        senderId: settings?.sender_id || process.env.SMS_API_SENDER_ID,
+        // The core send path passes the exact candidate it is attempting. Preserve
+        // settings/env resolution for legacy callers that do not pass one.
+        senderId: senderId || settings?.sender_id || process.env.SMS_API_SENDER_ID,
         campaignId: process.env.SMS_API_CAMPAIGN_ID,
     });
 }

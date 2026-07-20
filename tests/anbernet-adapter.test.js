@@ -117,6 +117,18 @@ test('classifyResponse: vendor code 1002 (no vendor balance) is fatal, not retry
     assert.strictEqual(classifyResponse(200, { code: 1002 }).fatal, true);
 });
 
+test('classifyResponse: only vendor code 1003 marks a sender ID as rejected', () => {
+    const rejected = classifyResponse(200, { status: 'failed', status_code: '1003' });
+    assert.strictEqual(rejected.success, false);
+    assert.strictEqual(rejected.fatal, false);
+    assert.strictEqual(rejected.reason, 'invalid_sender_id');
+    assert.strictEqual(rejected.senderIdRejected, true);
+
+    for (const code of [1004, 1005, 1006, 1007, 1008, 1009, 9001]) {
+        assert.notStrictEqual(classifyResponse(200, { code }).senderIdRejected, true, `code ${code} must not retry another sender`);
+    }
+});
+
 // ── Guards that must never hit the network ──────────────────────────────────
 
 test('missing config fails closed instead of sending empty credentials', async () => {

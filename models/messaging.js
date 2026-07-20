@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const { connection } = require('../startup/db');
 const { resolveProvider } = require('../services/sms-providers');
 const senderCatalog = require('./sms-sender-ids');
+const { buildSenderAttemptOrder } = require('../services/sender-fallback');
 
 const GSM7_REGEX = /^[@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞ ÆæßÉ !"#¤%&'()*+,\-.\/0-9:;<=>?¡A-ZÄÖÑÜa-zäöñüà^{}\\[\\]~|€]*$/;
 
@@ -40,20 +41,7 @@ async function getSettings(store_id) {
         WHERE store_id = ?
         LIMIT 1
     `, [store_id]);
-    const row = rows[0] || null;
-
-    // Additive global-default fallback for the sender ID. Only fills in when the
-    // store has no explicit assignment; when no global default is set this is a
-    // no-op and resolveProvider() still backstops with env SMS_API_SENDER_ID.
-    // getGlobalDefault() is cached, so this stays cheap on the send hot path and
-    // can never throw (a catalog problem must not break sending).
-    if (row && (!row.sender_id || String(row.sender_id).trim() === '')) {
-        try {
-            const globalDefault = await senderCatalog.getGlobalDefault();
-            if (globalDefault) row.sender_id = globalDefault;
-        } catch (e) { /* leave sender_id as-is; env fallback applies downstream */ }
-    }
-    return row;
+    return rows[0] || null;
 }
 
 async function getWebhookSigningSecret(store_id) {
@@ -272,18 +260,40 @@ async function sendSms(store_id, installation_id, phone, message, { event_topic,
         return { success: false, error: 'insufficient_balance', sms_credits: credits };
     }
 
-    // Get settings and resolve provider
     const settings = await getSettings(store_id);
-    const provider = resolveProvider(settings);
+    const globalSenderIds = await senderCatalog.getActiveGlobalSenderIds();
+    const senderAttemptOrder = buildSenderAttemptOrder({
+        assignedSenderId: settings?.sender_id,
+        globalSenderIds,
+        envSenderId: process.env.SMS_API_SENDER_ID,
+    });
 
-    // Send SMS. event_topic lets the provider distinguish transactional from
-    // promotional traffic (Anbernet maps it to transtype T vs P).
-    const result = await provider.sendSms(phone, message, { event_topic });
+    let result = {
+        success: false,
+        provider_response: { provider: 'anbernet', error: 'not_configured', reason: 'no sender ID configured' },
+    };
+    const senderAttempts = [];
+
+    for (const [index, senderId] of senderAttemptOrder.entries()) {
+        const provider = resolveProvider(settings, senderId);
+        result = await provider.sendSms(phone, message, { event_topic });
+        const response = result.provider_response || {};
+        senderAttempts.push({
+            sender_id: senderId,
+            ordinal: index + 1,
+            outcome: result.success ? 'sent' : (response.error || 'failed'),
+            ...(response.http_status ? { http_status: response.http_status } : {}),
+        });
+
+        if (result.success || response.sender_id_rejected !== true) break;
+    }
+
     const enrichedProviderResponse = {
         ...(result.provider_response || {}),
         meta: {
             source_app: source_app || null,
             metadata: metadata || null,
+            sender_attempts: senderAttempts,
         },
     };
 
