@@ -118,11 +118,16 @@ MySQL via `mysql2` connection pool (`startup/db.js`). All app tables prefixed `a
 
 ## Environment
 
-See `.env.example`. Groups:
-- **Server:** `PORT` (default 5002), `NODE_ENV`, `APP_BASE_URL`, `DASHBOARD_URL`, `SELORAX_APP_SLUG`
-- **MySQL:** `MYSQL_HOST`, `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_DATABASE`, `MYSQL_PORT`, `PLATFORM_DATABASE` (defaults to `selorax_dev`, used by the campaigns `users`-table fallback)
-- **Platform:** `SELORAX_CLIENT_ID`, `SELORAX_CLIENT_SECRET`, `SELORAX_API_URL`
-- **Auth:** `JWT_SECRET`, `SESSION_SIGNING_KEY` (optional — enables local session-token verification), `WEBHOOK_SIGNING_SECRET` (fallback only; prefer per-store secrets)
-- **Default SMS provider (BulkSMS BD):** `SMS_API_ENDPOINT`, `SMS_API_KEY`, `SMS_API_SENDER_ID`
-- **EPS Payment Gateway:** `EPS_BASE_URL`, `EPS_PG_URL`, `EPS_MERCHANT_ID`, `EPS_STORE_ID`, `EPS_USERNAME`, `EPS_PASSWORD`, `EPS_HASH_KEY`
+See `.env.example` — it lists exactly the 27 variables the source reads, no more.
+Groups:
+- **Server:** `PORT` (default 5002), `NODE_ENV`, `DASHBOARD_URL`
+- **MySQL:** `MYSQL_HOST`, `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_DATABASE`, `MYSQL_PORT`, `PLATFORM_DATABASE` (defaults to `selorax_dev`; campaigns `users`-table fallback, admin store-name lookups, platform webhook secrets)
+- **Platform:** `SELORAX_API_URL`, `SELORAX_CLIENT_ID`, `SELORAX_CLIENT_SECRET`, `SELORAX_APP_ID` (numeric; platform webhook-secret lookup), `SELORAX_APP_SLUG` (default `selorax-messaging`)
+- **Auth:** `JWT_SECRET`, `SESSION_SIGNING_KEY` (optional — enables local session-token verification), `WEBHOOK_SIGNING_SECRET` (fallback only; prefer per-store secrets), `INTERNAL_API_SECRET` (guards `/internal/*`; unset ⇒ 503), `SMS_ADMIN_JWT_SECRET` (admin cookie; falls back to `JWT_SECRET`)
+- **SMS provider (Anbernet):** `SMS_API_ENDPOINT`, `SMS_API_KEY`, `SMS_API_ACCOUNT`, `SMS_API_PASSWORD`, `SMS_API_SENDER_ID`, `SMS_API_CAMPAIGN_ID` (required for promotional/campaign sends)
 - **Dev-only:** `DEV_BYPASS_AUTH=true`, `DEV_STORE_ID` (requires `NODE_ENV=development`)
+
+`APP_BASE_URL` and the `EPS_*` group are **not read by any source file** — payments
+go through the platform billing API (`services/platform-billing.js`), not EPS. They
+survive commented out at the bottom of `.env.example` only so a deployed `.env` that
+still carries them is not mistaken for misconfiguration.

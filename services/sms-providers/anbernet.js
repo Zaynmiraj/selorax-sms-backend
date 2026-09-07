@@ -147,8 +147,33 @@ function classifyResponse(httpStatus, body) {
         return { success: false, fatal: false, reason: 'invalid_sender_id', senderIdRejected: true };
     }
 
-    if (body && body.status === 'success') {
-        return { success: true, fatal: false, reason: null };
+    // An HTTP error can never be an accepted send, whatever the body claims. Without
+    // this guard a 500 carrying a stray `status: "success"` would bill the merchant
+    // for a message that never left.
+    if (!(httpStatus >= 200 && httpStatus < 300)) {
+        return { success: false, fatal: false, reason: 'send_rejected' };
+    }
+
+    // Acceptance signals, in the order the vendor documents them.
+    //
+    // This used to be an exact match on the lowercase string 'success' and nothing
+    // else — a rule taken from docs/anbernet-api.md and never verified against a
+    // live send. A gateway that accepted the SMS but replied in any other documented
+    // shape was classified as a failure, and because models/messaging.js gates BOTH
+    // the log status and wallet.deductCredit() on this one boolean, the merchant saw
+    // `failed` on a message the customer had already received, un-billed, and the
+    // scheduler then retried it up to 3x.
+    const status = typeof (body && body.status) === 'string' ? body.status.trim().toLowerCase() : null;
+    if (status === 'success') {
+        return { success: true, fatal: false, reason: null, matched: 'status_success' };
+    }
+    if (numericCode === 9000) {
+        // docs/anbernet-api.md section 8: 9000 = "SMS accepted".
+        return { success: true, fatal: false, reason: null, matched: 'code_9000' };
+    }
+    if (body && Array.isArray(body.messageids) && body.messageids.length > 0) {
+        // The documented success example always carries per-recipient message ids.
+        return { success: true, fatal: false, reason: null, matched: 'messageids' };
     }
 
     return { success: false, fatal: false, reason: 'send_rejected' };
@@ -271,8 +296,13 @@ class AnbernetProvider {
                 body = { raw: text.slice(0, 500) };
             }
         } catch (err) {
-            // Network/timeout — transient, safe for the existing retry paths.
-            return fail(err.message);
+            // Network/timeout — transient, safe for the existing retry paths. This
+            // catch covers both the fetch AND the body read, so the vendor may
+            // already have accepted the message: the outcome is genuinely unknown.
+            // Stay `failed` (the safe direction — never bill an unconfirmed send)
+            // but mark the row so it is identifiable, e.g. for a later /dlrcheck
+            // reconciliation.
+            return fail(err.message, { indeterminate: true });
         }
 
         const verdict = classifyResponse(response.status, body);
@@ -281,19 +311,36 @@ class AnbernetProvider {
             tripCircuit(`${verdict.reason} (HTTP ${response.status})`);
         }
 
+        // redactSecrets: the vendor echoes submitted credentials back inside
+        // validation errors, and this object is persisted to app_messaging_logs.
+        const safeBody = redactSecrets(body);
+
+        // An unrecognised reply is the one failure mode that cannot be debugged
+        // after the fact, so say it out loud. This is what tells us a delivered
+        // SMS is being classified as a failure.
+        if (verdict.reason === 'send_rejected') {
+            console.warn(
+                `[Anbernet] send_rejected — HTTP ${response.status}, body: `
+                + JSON.stringify(safeBody).slice(0, 500)
+            );
+        }
+
         return {
             success: verdict.success,
             sms_type: isUnicode(message || '') ? 'unicode' : 'text',
-            // redactSecrets: the vendor echoes submitted credentials back inside
-            // validation errors, and this object is persisted to app_messaging_logs.
             provider_response: {
+                // Vendor body FIRST so our own diagnostics win a key collision. It
+                // used to be spread last, which let a vendor field named `error`,
+                // `http_status`, `receiver`, `provider` or `transtype` silently
+                // overwrite our classification in the stored log row.
+                ...safeBody,
                 provider: 'anbernet',
                 http_status: response.status,
                 transtype,
                 receiver,
                 ...(verdict.reason ? { error: verdict.reason } : {}),
+                ...(verdict.matched ? { matched: verdict.matched } : {}),
                 ...(verdict.senderIdRejected ? { sender_id_rejected: true } : {}),
-                ...redactSecrets(body),
             },
         };
     }

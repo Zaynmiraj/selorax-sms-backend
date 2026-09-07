@@ -63,10 +63,15 @@ Router.get('/store', asyncMiddleware(async (req, res) => {
             if (typeof providerResponse === 'string') {
                 try { providerResponse = JSON.parse(providerResponse); } catch { providerResponse = null; }
             }
-            const senderAttempts = providerResponse?.meta?.sender_attempts;
+            // Return the vendor reply in full. It is already credential-stripped at
+            // write time (redactSecrets in the Anbernet adapter). This used to be
+            // reduced to meta.sender_attempts only, which is precisely why a
+            // misclassified send was impossible to diagnose from the panel — the
+            // gateway's actual response never reached anyone. meta.sender_attempts
+            // stays where the existing panel UI reads it.
             return {
                 ...r,
-                provider_response: Array.isArray(senderAttempts) ? { meta: { sender_attempts: senderAttempts } } : null,
+                provider_response: providerResponse || null,
                 store_name: names[r.store_id] || null,
             };
         }),

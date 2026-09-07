@@ -80,13 +80,63 @@ test('normalizeBd rejects junk rather than sending it to a banning API', () => {
 });
 
 // ── Response classification ─────────────────────────────────────────────────
-// Success is the string "success" — NOT BulkSMS's response_code 202. A false
-// positive here logs undelivered SMS as `sent` and burns customer credits.
+// This is the single most consequential function in the adapter: models/messaging.js
+// gates BOTH the log status and wallet.deductCredit() on the `success` it returns.
+//
+// A false POSITIVE logs an undelivered SMS as `sent` and burns customer credits.
+// A false NEGATIVE — the bug these acceptance tests were added for — logs a
+// DELIVERED SMS as `failed`, never charges the store, and makes scheduler.js retry
+// it up to 3x, so the customer receives the same message repeatedly.
 
-test('classifyResponse: status "success" is the ONLY success signal', () => {
+test('classifyResponse: the documented status "success" body is a success', () => {
     const v = classifyResponse(200, { status: 'success', total: 1, messageids: [] });
     assert.strictEqual(v.success, true);
     assert.strictEqual(v.fatal, false);
+    assert.strictEqual(v.matched, 'status_success');
+});
+
+test('classifyResponse: status match is case- and whitespace-insensitive', () => {
+    for (const status of ['Success', 'SUCCESS', ' success ', 'SuCcEsS']) {
+        const v = classifyResponse(200, { status });
+        assert.strictEqual(v.success, true, `${JSON.stringify(status)} must be accepted`);
+        assert.strictEqual(v.matched, 'status_success');
+    }
+});
+
+test('classifyResponse: vendor code 9000 ("SMS accepted") is a success', () => {
+    // docs/anbernet-api.md section 8. Previously unhandled: it fell through to
+    // send_rejected, so an accepted SMS was logged failed and never billed.
+    assert.strictEqual(classifyResponse(200, { code: 9000 }).success, true);
+    assert.strictEqual(classifyResponse(200, { status_code: '9000' }).success, true);
+    assert.strictEqual(classifyResponse(200, { code: 9000 }).matched, 'code_9000');
+});
+
+test('classifyResponse: a body carrying messageids is a success even with no status', () => {
+    const v = classifyResponse(200, {
+        messageids: [{ receiver: '8801760505055', messageid: '550e8400-e29b-41d4-a716-446655440000' }],
+    });
+    assert.strictEqual(v.success, true);
+    assert.strictEqual(v.matched, 'messageids');
+
+    // An empty array is not an acceptance.
+    assert.strictEqual(classifyResponse(200, { messageids: [] }).success, false);
+});
+
+test('classifyResponse: an HTTP error is never a success, whatever the body claims', () => {
+    // Guards the opposite failure: billing for a message that never left.
+    for (const httpStatus of [400, 404, 422, 500, 502, 503]) {
+        assert.strictEqual(
+            classifyResponse(httpStatus, { status: 'success', messageids: [{ messageid: 'x' }] }).success,
+            false,
+            `HTTP ${httpStatus} must not be billable`
+        );
+    }
+});
+
+test('classifyResponse: a fatal vendor code still wins over an acceptance signal', () => {
+    // Order matters — 1001/1002/1003 are checked before any success signal.
+    assert.strictEqual(classifyResponse(200, { code: 1001, status: 'success' }).success, false);
+    assert.strictEqual(classifyResponse(200, { code: 1003, status: 'success' }).senderIdRejected, true);
 });
 
 test('classifyResponse: BulkSMS-style 202 must NOT be read as success', () => {
@@ -126,6 +176,68 @@ test('classifyResponse: only vendor code 1003 marks a sender ID as rejected', ()
 
     for (const code of [1004, 1005, 1006, 1007, 1008, 1009, 9001]) {
         assert.notStrictEqual(classifyResponse(200, { code }).senderIdRejected, true, `code ${code} must not retry another sender`);
+    }
+});
+
+// ── provider_response shaping (stubbed fetch — still no real network) ───────
+// This object is persisted to app_messaging_logs.provider_response and is the only
+// record of why a send was classified the way it was.
+
+function withStubbedFetch(status, bodyText, fn) {
+    const realFetch = global.fetch;
+    global.fetch = async () => ({ status, text: async () => bodyText });
+    return Promise.resolve(fn()).finally(() => { global.fetch = realFetch; });
+}
+
+const stubProvider = () => new AnbernetProvider({
+    baseUrl: 'https://example.invalid/api/v1',
+    account: 'a', apiKey: 'k', senderId: 'SELORAX',
+});
+
+test('a vendor field named "error" cannot overwrite our classification', async () => {
+    resetCircuit();
+    // The vendor body used to be spread LAST, so its own `error`/`http_status` keys
+    // silently replaced ours and hid the real reason from the log row.
+    await withStubbedFetch(200, JSON.stringify({ error: 'vendor text', http_status: 999 }), async () => {
+        const r = await stubProvider().sendSms('01760505055', 'hi');
+        assert.strictEqual(r.success, false);
+        assert.strictEqual(r.provider_response.error, 'send_rejected');
+        assert.strictEqual(r.provider_response.http_status, 200);
+        assert.strictEqual(r.provider_response.receiver, '8801760505055');
+    });
+});
+
+test('an accepted send records which signal matched', async () => {
+    resetCircuit();
+    await withStubbedFetch(200, JSON.stringify({ code: 9000 }), async () => {
+        const r = await stubProvider().sendSms('01760505055', 'hi');
+        assert.strictEqual(r.success, true);
+        assert.strictEqual(r.provider_response.matched, 'code_9000');
+        assert.strictEqual(r.provider_response.error, undefined);
+    });
+});
+
+test('a non-JSON body is preserved raw and stays a failure', async () => {
+    resetCircuit();
+    await withStubbedFetch(200, '<html>gateway down</html>', async () => {
+        const r = await stubProvider().sendSms('01760505055', 'hi');
+        assert.strictEqual(r.success, false);
+        assert.strictEqual(r.provider_response.error, 'send_rejected');
+        assert.match(r.provider_response.raw, /gateway down/);
+    });
+});
+
+test('a network failure is marked indeterminate, not a confirmed failure', async () => {
+    resetCircuit();
+    const realFetch = global.fetch;
+    global.fetch = async () => { throw new Error('The operation was aborted due to timeout'); };
+    try {
+        const r = await stubProvider().sendSms('01760505055', 'hi');
+        assert.strictEqual(r.success, false);
+        assert.strictEqual(r.provider_response.indeterminate, true);
+        assert.match(r.provider_response.error, /timeout/);
+    } finally {
+        global.fetch = realFetch;
     }
 });
 
