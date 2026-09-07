@@ -127,10 +127,29 @@ function redactSecrets(value) {
 }
 
 /**
+ * The live gateway does NOT return a JSON object — it returns a JSON ARRAY of the
+ * form `[{...payload}, 200]` (a FastAPI-style `return payload, status` tuple).
+ *
+ * Observed 2026-09-07 in log 6674: a DELIVERED SMS carrying
+ * `{status:"success", smstype:"queued", success_count:1, messageids:[…]}` inside
+ * element 0, classified `send_rejected` because `body.status` is undefined on an
+ * array. Unwrap to the payload before reading any field off it.
+ *
+ * The vendor's own 422 validation errors are also arrays (of error objects), which
+ * is why this only picks the first object and never assumes it means success —
+ * classification still has to earn it.
+ */
+function unwrapVendorBody(body) {
+    if (!Array.isArray(body)) return body;
+    return body.find((part) => part && typeof part === 'object' && !Array.isArray(part)) || null;
+}
+
+/**
  * Map a vendor reply onto our result shape.
  * Exported for tests so the success/failure rules can be verified without network.
  */
-function classifyResponse(httpStatus, body) {
+function classifyResponse(httpStatus, rawBody) {
+    const body = unwrapVendorBody(rawBody);
     if (httpStatus === 401) {
         return { success: false, fatal: true, reason: 'auth_failed' };
     }
@@ -151,6 +170,14 @@ function classifyResponse(httpStatus, body) {
     // this guard a 500 carrying a stray `status: "success"` would bill the merchant
     // for a message that never left.
     if (!(httpStatus >= 200 && httpStatus < 300)) {
+        return { success: false, fatal: false, reason: 'send_rejected' };
+    }
+
+    // The envelope can say "success" while the recipient itself was rejected. The
+    // app sends exactly one receiver per request, so these counts are unambiguous —
+    // and billing for a message the gateway refused is the failure mode this whole
+    // function exists to prevent.
+    if (body && Number(body.failed_count) > 0 && Number(body.success_count) === 0) {
         return { success: false, fatal: false, reason: 'send_rejected' };
     }
 
@@ -314,6 +341,7 @@ class AnbernetProvider {
         // redactSecrets: the vendor echoes submitted credentials back inside
         // validation errors, and this object is persisted to app_messaging_logs.
         const safeBody = redactSecrets(body);
+        const safePayload = redactSecrets(unwrapVendorBody(body));
 
         // An unrecognised reply is the one failure mode that cannot be debugged
         // after the fact, so say it out loud. This is what tells us a delivered
@@ -333,7 +361,13 @@ class AnbernetProvider {
                 // used to be spread last, which let a vendor field named `error`,
                 // `http_status`, `receiver`, `provider` or `transtype` silently
                 // overwrite our classification in the stored log row.
-                ...safeBody,
+                //
+                // The gateway replies with an ARRAY (`[{...payload}, 200]`), and
+                // spreading an array into an object yields useless "0"/"1" keys —
+                // exactly what log 6674 stored. Flatten to the payload, and keep the
+                // untouched reply under vendor_body so nothing is lost.
+                ...(Array.isArray(safeBody) ? { vendor_body: safeBody } : safeBody),
+                ...(Array.isArray(safeBody) && safePayload ? safePayload : {}),
                 provider: 'anbernet',
                 http_status: response.status,
                 transtype,
@@ -406,6 +440,7 @@ module.exports = AnbernetProvider;
 module.exports.normalizeBd = normalizeBd;
 module.exports.senderIdError = senderIdError;
 module.exports.classifyResponse = classifyResponse;
+module.exports.unwrapVendorBody = unwrapVendorBody;
 module.exports.redactSecrets = redactSecrets;
 module.exports.resetCircuit = resetCircuit;
 module.exports.getCircuitReason = getCircuitReason;

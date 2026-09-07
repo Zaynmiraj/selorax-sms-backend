@@ -11,7 +11,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 
 const AnbernetProvider = require('../services/sms-providers/anbernet');
-const { normalizeBd, classifyResponse, resetCircuit, getCircuitReason, redactSecrets } = AnbernetProvider;
+const { normalizeBd, classifyResponse, resetCircuit, getCircuitReason, redactSecrets, unwrapVendorBody } = AnbernetProvider;
 
 // ── Credential redaction ────────────────────────────────────────────────────
 // The vendor echoes the submitted request back inside 422 validation errors, and
@@ -93,6 +93,63 @@ test('classifyResponse: the documented status "success" body is a success', () =
     assert.strictEqual(v.success, true);
     assert.strictEqual(v.fatal, false);
     assert.strictEqual(v.matched, 'status_success');
+});
+
+// The REAL production reply, copied verbatim from log 6674 (2026-09-07). The
+// gateway returns a JSON ARRAY — `[{...payload}, 200]` — not an object. This SMS
+// was delivered (`success_count: 1`, real messageid) and was still classified
+// `send_rejected`, logged `failed`, and never billed, because `body.status` is
+// undefined on an array.
+const LIVE_SUCCESS_BODY = [
+    {
+        status: 'success',
+        account: 'Selorax',
+        smstype: 'queued',
+        total: 1,
+        success_count: 1,
+        failed_count: 0,
+        messageids: [
+            { receiver: '8801731620933', messageid: '12ed5f10-29b0-4f57-9aa0-6442155b9826' },
+        ],
+    },
+    200,
+];
+
+test('classifyResponse: the REAL array-wrapped gateway reply is a success', () => {
+    const v = classifyResponse(200, LIVE_SUCCESS_BODY);
+    assert.strictEqual(v.success, true, 'log 6674 was a delivered SMS logged as failed');
+    assert.strictEqual(v.fatal, false);
+    assert.strictEqual(v.matched, 'status_success');
+});
+
+test('classifyResponse: an array reply whose only recipient failed is NOT billable', () => {
+    const v = classifyResponse(200, [
+        { status: 'success', total: 1, success_count: 0, failed_count: 1, messageids: [] },
+        200,
+    ]);
+    assert.strictEqual(v.success, false);
+    assert.strictEqual(v.reason, 'send_rejected');
+});
+
+test('classifyResponse: array-wrapped vendor error codes still classify', () => {
+    assert.strictEqual(classifyResponse(200, [{ code: 1003 }, 200]).senderIdRejected, true);
+    assert.strictEqual(classifyResponse(200, [{ code: 1002 }, 200]).fatal, true);
+    assert.strictEqual(classifyResponse(200, [{ code: 9000 }, 200]).success, true);
+});
+
+test('classifyResponse: a 422 validation array is still a failure, never a success', () => {
+    const real422 = [
+        { type: 'missing', loc: ['body', 'password'], msg: 'Field required', input: { account: 'Selorax' } },
+    ];
+    assert.strictEqual(classifyResponse(422, real422).success, false);
+    assert.strictEqual(classifyResponse(200, real422).success, false);
+});
+
+test('unwrapVendorBody leaves a plain object reply untouched', () => {
+    const obj = { status: 'success' };
+    assert.strictEqual(unwrapVendorBody(obj), obj);
+    assert.strictEqual(unwrapVendorBody(null), null);
+    assert.strictEqual(unwrapVendorBody([200]), null, 'an array with no payload object yields nothing');
 });
 
 test('classifyResponse: status match is case- and whitespace-insensitive', () => {
@@ -192,6 +249,25 @@ function withStubbedFetch(status, bodyText, fn) {
 const stubProvider = () => new AnbernetProvider({
     baseUrl: 'https://example.invalid/api/v1',
     account: 'a', apiKey: 'k', senderId: 'SELORAX',
+});
+
+test('the real array-wrapped reply is stored flat, not as "0"/"1" keys', async () => {
+    resetCircuit();
+    await withStubbedFetch(200, JSON.stringify(LIVE_SUCCESS_BODY), async () => {
+        const r = await stubProvider().sendSms('01731620933', 'hi');
+        assert.strictEqual(r.success, true);
+        assert.strictEqual(r.provider_response.matched, 'status_success');
+        assert.strictEqual(r.provider_response.error, undefined);
+        // The payload is flattened onto the row…
+        assert.strictEqual(r.provider_response.status, 'success');
+        assert.strictEqual(r.provider_response.success_count, 1);
+        // …and the untouched reply is preserved, with no "0"/"1" junk keys.
+        assert.ok(Array.isArray(r.provider_response.vendor_body));
+        assert.strictEqual(r.provider_response['0'], undefined);
+        // Our own diagnostics still win.
+        assert.strictEqual(r.provider_response.http_status, 200);
+        assert.strictEqual(r.provider_response.receiver, '8801731620933');
+    });
 });
 
 test('a vendor field named "error" cannot overwrite our classification', async () => {
