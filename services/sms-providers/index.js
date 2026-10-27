@@ -1,40 +1,18 @@
-const AnbernetProvider = require('./anbernet');
+const platform = require('./platform');
 
 /**
- * SMS provider registry.
+ * SMS transport.
  *
- * The app sends through a single provider: Anbernet. Its credentials live under the
- * standard, provider-neutral SMS_API_* env names so the same convention carries over
- * to the other SeloraX apps:
+ * Every SMS goes through the SeloraX Messages platform as a partner
+ * (./platform.js). Which sender ID and gateway a store uses is decided THERE,
+ * per store, in the platform's /admin — this app no longer knows about
+ * Anbernet, sender IDs or gateways.
  *
- *   SMS_API_ENDPOINT   base URL          e.g. https://wapi.anbernet.com:9956/api/v1
- *   SMS_API_KEY        token / api key
- *   SMS_API_SENDER_ID  default sender id (per-store settings.sender_id overrides it)
- *   SMS_API_ACCOUNT    account name
- *   SMS_API_PASSWORD   account password  (required by /balance and /sendsms auth)
- *   SMS_API_CAMPAIGN_ID  approved campaign id, only needed for promotional traffic
- *
- * (History: this used to switch between BulkSMS and Anbernet via SMS_PROVIDER +
- * a per-store canary. Once every store was migrated to Anbernet, BulkSMS and the
- * selection logic were removed. Reintroduce a switch here if a second provider is
- * ever added.)
+ * (History: BulkSMS, then a direct Anbernet adapter with a local sender-ID
+ * catalog and fallback loop. Both removed when sending moved to the platform.)
  */
-
-/**
- * Resolve the SMS provider for a store.
- * @param {object|null} settings row from app_messaging_settings (SELECT *)
- */
-function resolveProvider(settings, senderId) {
-    return new AnbernetProvider({
-        baseUrl: process.env.SMS_API_ENDPOINT,
-        account: process.env.SMS_API_ACCOUNT,
-        apiKey: process.env.SMS_API_KEY,
-        password: process.env.SMS_API_PASSWORD,
-        // The core send path passes the exact candidate it is attempting. Preserve
-        // settings/env resolution for legacy callers that do not pass one.
-        senderId: senderId || settings?.sender_id || process.env.SMS_API_SENDER_ID,
-        campaignId: process.env.SMS_API_CAMPAIGN_ID,
-    });
+function resolveProvider() {
+    return platform;
 }
 
 module.exports = { resolveProvider };

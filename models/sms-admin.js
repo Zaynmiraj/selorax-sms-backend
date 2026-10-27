@@ -9,7 +9,6 @@ const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { connection } = require('../startup/db');
-const { normalizeBd, redactSecrets } = require('../services/sms-providers/anbernet');
 const { resolveProvider } = require('../services/sms-providers');
 
 const db = connection.promise();
@@ -17,6 +16,29 @@ const db = connection.promise();
 const OTP_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const TOKEN_TTL = '24h';
 const COOKIE_NAME = 'sms_admin_token';
+
+/** Bangladeshi number → `8801XXXXXXXXX`, or null for anything unrecognised. */
+function normalizeBd(phone) {
+    if (phone === null || phone === undefined) return null;
+    const digits = String(phone).trim().replace(/[\s()-]/g, '');
+    const national = digits.match(/^(?:\+?880|0)?(1[3-9]\d{8})$/);
+    return national ? `880${national[1]}` : null;
+}
+
+const SECRET_KEYS = new Set(['password', 'token', 'api_key', 'apikey', 'authorization', 'idempotency_key']);
+
+/** Strip anything credential-like before a provider response is stored. */
+function redactSecrets(value) {
+    if (Array.isArray(value)) return value.map(redactSecrets);
+    if (value && typeof value === 'object') {
+        const out = {};
+        for (const [k, v] of Object.entries(value)) {
+            out[k] = SECRET_KEYS.has(k.toLowerCase()) ? '[redacted]' : redactSecrets(v);
+        }
+        return out;
+    }
+    return value;
+}
 
 function jwtSecret() {
     const secret = process.env.SMS_ADMIN_JWT_SECRET || process.env.JWT_SECRET;
@@ -74,8 +96,9 @@ function publicAdmin(row) {
 /**
  * Send a login OTP. Only known, active admins can request one (no self-signup).
  * Returns { sent:true } on success; throws with .code otherwise.
- * The OTP SMS goes through the provider directly — it does NOT consume any
- * store's sms_credits and is never written to app_messaging_logs.
+ * The OTP SMS goes through the SeloraX Messages platform WITHOUT a store
+ * (the partner's general sender) — it does NOT consume any store's
+ * sms_credits and is never written to app_messaging_logs.
  */
 async function requestOtp(phone) {
     const admin = await findByPhone(phone);
@@ -93,8 +116,8 @@ async function requestOtp(phone) {
     let sendResult = null;
     let sendError = null;
     try {
-        const provider = resolveProvider(null); // env SMS_API_* (global sender)
-        sendResult = await provider.sendSms(admin.phone, `Your SeloraX SMS Admin login OTP is ${otp}`, {
+        // No store_id: the platform sends as our partner's general sender.
+        sendResult = await resolveProvider().sendSms(admin.phone, `Your SeloraX SMS Admin login OTP is ${otp}`, {
             event_topic: 'admin.otp',
         });
     } catch (e) {
@@ -107,7 +130,7 @@ async function requestOtp(phone) {
         phone: admin.phone,
         purpose: 'login_otp',
         status: sendResult?.success ? 'sent' : 'failed',
-        provider: 'anbernet',
+        provider: 'platform',
         provider_response: sendResult?.provider_response ?? null,
         error: sendError ? sendError.message : (sendResult && !sendResult.success ? 'send_failed' : null),
     });

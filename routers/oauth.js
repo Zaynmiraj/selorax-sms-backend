@@ -13,6 +13,33 @@ const asyncMiddleware = require('../middlewares/asyncMiddleware');
 const messaging = require('../models/messaging');
 const { connection } = require('../startup/db');
 const scheduler = require('../services/scheduler');
+const platformSms = require('../services/sms-providers/platform');
+
+/** The store's name/domain from the shared platform DB, or {} if unreachable. */
+async function storeDetails(store_id) {
+    const platformDb = messaging.validateDatabaseIdentifier(process.env.PLATFORM_DATABASE);
+    if (!platformDb) return {};
+    try {
+        const [rows] = await connection.promise().query(
+            `SELECT name, domain FROM \`${platformDb}\`.stores WHERE store_id = ?`, [store_id]
+        );
+        return rows[0] ? { name: rows[0].name || null, domain: rows[0].domain || null } : {};
+    } catch {
+        return {};
+    }
+}
+
+/**
+ * Tell the SeloraX Messages platform about the store (so it shows up in its
+ * admin with a name, ready for a sender ID). Best-effort and not awaited by the
+ * caller: a send registers the store anyway.
+ */
+function syncStoreToPlatform(store_id, extra) {
+    storeDetails(store_id)
+        .then((details) => platformSms.registerStore(store_id, { ...details, ...extra }))
+        .then((r) => { if (!r.ok) console.warn(`[OAuth] platform store sync failed for store_id=${store_id}: ${r.error}`); })
+        .catch((e) => console.warn(`[OAuth] platform store sync failed for store_id=${store_id}: ${e.message}`));
+}
 
 /**
  * POST /api/messaging/oauth/token
@@ -40,6 +67,8 @@ Router.post('/token', asyncMiddleware(async (req, res) => {
     if (installation_id) {
         await messaging.ensureSettings(store_id, installation_id);
     }
+
+    syncStoreToPlatform(store_id, { active: true });
 
     console.log(`[OAuth] Install acknowledged for store_id=${store_id}, installation_id=${installation_id}`);
     res.send({ message: 'Installation acknowledged.', status: 200 });
@@ -85,6 +114,8 @@ Router.post('/revoke', asyncMiddleware(async (req, res) => {
 
     // Cancel all pending scheduled SMS
     await scheduler.cancelAllForStore(store_id);
+
+    syncStoreToPlatform(store_id, { active: false });
 
     console.log(`[OAuth] Uninstall completed for store_id=${store_id} — settings, templates & scheduled jobs deactivated`);
     res.send({ message: 'Uninstall acknowledged.', status: 200 });

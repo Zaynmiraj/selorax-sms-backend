@@ -10,9 +10,11 @@ SeloraX Messaging is an SMS notification microservice for the SeloraX e-commerce
 
 - **Dev server:** `yarn dev` (nodemon, auto-restart)
 - **Production:** `yarn start` (or `yarn start:bun` for Bun runtime)
-- **No build step, no tests, no linter configured.**
+- **Tests:** `yarn test` (`node --test tests/*.test.js`). `tests/platform-adapter.test.js` is
+  fully offline (`fetch` mocked); the others load the DB module, so dependencies must be installed.
+- No build step, no linter.
 
-Migrations in `migrations/` (currently `003`–`008`) must be applied manually, in order, against the shared platform MySQL database.
+Migrations in `migrations/` (currently `003`–`012`) must be applied manually, in order, against the shared platform MySQL database.
 
 ## Architecture
 
@@ -75,11 +77,34 @@ Three audience types: `manual` (raw phone list), `csv` (same as manual, differen
 
 Create flow validates phones, deduplicates, checks `sms_credits >= recipients * calculateSmsParts(message)` (returns 402 otherwise), inserts the campaign and all recipients. Sending is picked up asynchronously by `campaign-sender.js`.
 
-`calculateSmsParts()` in `models/messaging.js` detects GSM-7 vs. Unicode and returns the multi-part count (160/153 for GSM-7, 70/67 for Unicode).
+`calculateSmsParts()` in `models/messaging.js` is a flat rule: `ceil(length / 70)` credits, whatever the encoding.
 
-### SMS providers (`services/sms-providers/`)
+### Sending SMS: through the SeloraX Messages platform (`services/sms-providers/platform.js`)
 
-Only BulkSMS BD exists today. Provider resolution: if `settings.use_own_provider` is set with `api_key`, use merchant keys; otherwise use the platform env defaults (`SMS_API_ENDPOINT`, `SMS_API_KEY`, `SMS_API_SENDER_ID`). The adapter auto-detects non-GSM-7 characters and sends `type=unicode` instead of `type=text`.
+This app no longer talks to any gateway. Every SMS is a `POST {MESSAGING_PLATFORM_URL}/api/v1/messages`
+with our **partner** API key and `store_ref = store_id` (no `store_ref` for the admin login OTP).
+The platform (repo `selorax-messaging-platform`) picks that store's **sender ID and gateway** —
+both set per store in the platform's `/admin` → organization → "Partner stores" — and charges the
+partner wallet (postpaid). **Store SMS credits stay here** (`messaging-wallet.js`): `sendSms()`
+checks credits, sends, logs, and deducts only on success, exactly as before.
+
+- `sendSms()` in the adapter never throws; returns `{ success, sms_type, provider_response }`.
+  Platform `sent` **and `unknown`** count as success (an unknown SMS may have gone out and is
+  charged to us). Failures carry an `error` code (`no_sender_id`, `platform_insufficient_funds`,
+  `sending_unavailable`, `invalid_receiver`, `suppressed`, `rate_limited`, `auth_failed`,
+  `network_error`, …) which `models/messaging.js` `sendSms()` now returns to callers.
+- One retry on timeout / network error / 5xx / 409 with the **same `Idempotency-Key`** — the
+  platform replays or never recorded it, so a retry cannot double-send.
+- Campaign sends (`event_topic: 'campaign'`) go as `promotional: true`.
+- Install/uninstall (`routers/oauth.js`) best-effort `PUT /api/v1/stores/{store_id}` with the
+  store's name/domain and `active` so it shows up in the platform admin.
+- `provider_response` stores `{ provider:'platform', status, message_id, batch_id, sender_id, … }`
+  plus `meta` (`retried_from_log_id` lives in `meta.metadata`). Never the API key.
+- **Removed:** the direct Anbernet adapter, the local sender-ID catalog/fallback
+  (`sms_sender_ids`, `/api/admin/sender-ids`, `PATCH /api/admin/stores/:id/sender-id`) and
+  `SMS_API_*`. The `sms_sender_ids` table and `app_messaging_settings.sender_id` column are still in
+  the DB, unused. `scripts/export-for-platform.js` (read-only) exported them for the platform's
+  `scripts/import-partner-stores.ts`.
 
 ### Route map
 
@@ -118,13 +143,13 @@ MySQL via `mysql2` connection pool (`startup/db.js`). All app tables prefixed `a
 
 ## Environment
 
-See `.env.example` — it lists exactly the 27 variables the source reads, no more.
+See `.env.example` — it lists exactly the variables the source reads, no more.
 Groups:
 - **Server:** `PORT` (default 5002), `NODE_ENV`, `DASHBOARD_URL`
 - **MySQL:** `MYSQL_HOST`, `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_DATABASE`, `MYSQL_PORT`, `PLATFORM_DATABASE` (defaults to `selorax_dev`; campaigns `users`-table fallback, admin store-name lookups, platform webhook secrets)
 - **Platform:** `SELORAX_API_URL`, `SELORAX_CLIENT_ID`, `SELORAX_CLIENT_SECRET`, `SELORAX_APP_ID` (numeric; platform webhook-secret lookup), `SELORAX_APP_SLUG` (default `selorax-messaging`)
 - **Auth:** `JWT_SECRET`, `SESSION_SIGNING_KEY` (optional — enables local session-token verification), `WEBHOOK_SIGNING_SECRET` (fallback only; prefer per-store secrets), `INTERNAL_API_SECRET` (guards `/internal/*`; unset ⇒ 503), `SMS_ADMIN_JWT_SECRET` (admin cookie; falls back to `JWT_SECRET`)
-- **SMS provider (Anbernet):** `SMS_API_ENDPOINT`, `SMS_API_KEY`, `SMS_API_ACCOUNT`, `SMS_API_PASSWORD`, `SMS_API_SENDER_ID`, `SMS_API_CAMPAIGN_ID` (required for promotional/campaign sends)
+- **SMS sending (SeloraX Messages platform):** `MESSAGING_PLATFORM_URL`, `MESSAGING_PLATFORM_API_KEY` (partner key)
 - **Dev-only:** `DEV_BYPASS_AUTH=true`, `DEV_STORE_ID` (requires `NODE_ENV=development`)
 
 `APP_BASE_URL` and the `EPS_*` group are **not read by any source file** — payments

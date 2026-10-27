@@ -1,8 +1,6 @@
 const crypto = require('crypto');
 const { connection } = require('../startup/db');
 const { resolveProvider } = require('../services/sms-providers');
-const senderCatalog = require('./sms-sender-ids');
-const { buildSenderAttemptOrder } = require('../services/sender-fallback');
 
 const GSM7_REGEX = /^[@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞ ÆæßÉ !"#¤%&'()*+,\-.\/0-9:;<=>?¡A-ZÄÖÑÜa-zäöñüà^{}\\[\\]~|€]*$/;
 
@@ -135,7 +133,8 @@ async function ensureWebhookSigningSecret(store_id) {
  */
 async function updateSettings(store_id, installation_id, updates) {
     const allowed = [
-        'is_enabled', 'use_own_provider', 'provider', 'api_key', 'sender_id',
+        // sender_id is gone: sender IDs are set per store in the SeloraX Messages admin.
+        'is_enabled', 'use_own_provider', 'provider', 'api_key',
         'provider_endpoint', 'auto_sms_enabled',
         'auto_renew_enabled', 'auto_renew_package_id', 'auto_renew_threshold',
     ];
@@ -260,40 +259,17 @@ async function sendSms(store_id, installation_id, phone, message, { event_topic,
         return { success: false, error: 'insufficient_balance', sms_credits: credits };
     }
 
-    const settings = await getSettings(store_id);
-    const globalSenderIds = await senderCatalog.getActiveGlobalSenderIds();
-    const senderAttemptOrder = buildSenderAttemptOrder({
-        assignedSenderId: settings?.sender_id,
-        globalSenderIds,
-        envSenderId: process.env.SMS_API_SENDER_ID,
-    });
+    // Sender ID and gateway are chosen per store by the SeloraX Messages
+    // platform (services/sms-providers/platform.js); this app only says which
+    // store the SMS is for.
+    const result = await resolveProvider().sendSms(phone, message, { event_topic, store_id });
 
-    let result = {
-        success: false,
-        provider_response: { provider: 'anbernet', error: 'not_configured', reason: 'no sender ID configured' },
-    };
-    const senderAttempts = [];
-
-    for (const [index, senderId] of senderAttemptOrder.entries()) {
-        const provider = resolveProvider(settings, senderId);
-        result = await provider.sendSms(phone, message, { event_topic });
-        const response = result.provider_response || {};
-        senderAttempts.push({
-            sender_id: senderId,
-            ordinal: index + 1,
-            outcome: result.success ? 'sent' : (response.error || 'failed'),
-            ...(response.http_status ? { http_status: response.http_status } : {}),
-        });
-
-        if (result.success || response.sender_id_rejected !== true) break;
-    }
-
+    // `meta` is load-bearing: retry bookkeeping reads $.meta.metadata.
     const enrichedProviderResponse = {
         ...(result.provider_response || {}),
         meta: {
             source_app: source_app || null,
             metadata: metadata || null,
-            sender_attempts: senderAttempts,
         },
     };
 
@@ -335,6 +311,7 @@ async function sendSms(store_id, installation_id, phone, message, { event_topic,
 
     return {
         success: result.success,
+        ...(result.success ? {} : { error: result.provider_response?.error || 'send_failed' }),
         log_id: sms_log_id,
         sms_credits: remainingCredits,
         provider_response: enrichedProviderResponse,

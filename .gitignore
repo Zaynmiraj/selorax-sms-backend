@@ -1,3 +1,5 @@
 node_modules/
 .env
 CLAUDE.md
+# Output of scripts/export-for-platform.js (store data)
+platform-export*.json
