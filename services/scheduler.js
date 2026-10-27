@@ -2,7 +2,9 @@ const crypto = require('crypto');
 const { connection } = require('../startup/db');
 const messaging = require('../models/messaging');
 const payment = require('../models/messaging-payment');
-const { PERMANENT_ERRORS } = require('./sms-providers/platform');
+const platformSms = require('./sms-providers/platform');
+const { PERMANENT_ERRORS, SYSTEMIC_ERRORS } = platformSms;
+let warnedNotConfigured = false;
 
 let pollInterval = null;
 let renewalInterval = null;
@@ -90,6 +92,14 @@ async function getScheduledJobs(store_id, { page = 1, limit = 20, status } = {})
  * Process due jobs — called by the poll interval
  */
 async function processDueJobs() {
+    // Sending is not set up: leave every job queued rather than burning it.
+    if (!platformSms.isConfigured()) {
+        if (!warnedNotConfigured) console.error('[Scheduler] MESSAGING_PLATFORM_URL / _API_KEY not set — holding scheduled SMS.');
+        warnedNotConfigured = true;
+        return;
+    }
+    warnedNotConfigured = false;
+
     // Atomic claim: mark due pending jobs as 'processing' in one UPDATE and
     // tag them with a unique claim token in `last_error` so we can then
     // SELECT exactly the rows we just claimed. This eliminates the
@@ -146,7 +156,9 @@ async function processDueJobs() {
                 // Don't retry what may already have gone out (indeterminate) or
                 // what cannot succeed (bad number, no sender ID, …).
                 const final = result.indeterminate || PERMANENT_ERRORS.has(result.error);
-                await handleJobFailure(job, result.error || 'SMS send failed', { final });
+                // Platform-wide outage/misconfig: hold the job, don't spend an attempt.
+                const systemic = !final && SYSTEMIC_ERRORS.has(result.error);
+                await handleJobFailure(job, result.error || 'SMS send failed', { final, systemic });
             }
         } catch (err) {
             await handleJobFailure(job, err.message);
@@ -157,7 +169,16 @@ async function processDueJobs() {
 /**
  * Handle a failed job — retry with exponential backoff or mark as failed
  */
-async function handleJobFailure(job, errorMsg, { final = false } = {}) {
+async function handleJobFailure(job, errorMsg, { final = false, systemic = false } = {}) {
+    if (systemic) {
+        await connection.promise().query(/*sql*/`
+            UPDATE app_messaging_scheduled
+            SET status = 'pending', last_error = ?, scheduled_at = DATE_ADD(NOW(), INTERVAL 2 MINUTE)
+            WHERE job_id = ?
+        `, [errorMsg, job.job_id]);
+        console.warn(`[Scheduler] Job ${job.job_id} held (${errorMsg}) — retry in 2min, attempt not counted`);
+        return;
+    }
     const newAttempts = (job.attempts || 0) + 1;
 
     if (final || newAttempts >= (job.max_attempts || 3)) {

@@ -151,6 +151,12 @@ Router.post('/logs/:log_id/retry', auth, asyncMiddleware(async (req, res) => {
             status: 400, code: 'not_retryable',
         });
     }
+    if (messaging.isPossiblySent(log) && req.body?.confirm_possibly_sent !== true) {
+        return res.status(409).send({
+            message: 'This SMS may already have been delivered (the send timed out). Retrying could send it twice.',
+            status: 409, code: 'possibly_sent',
+        });
+    }
 
     const { scheduled_at } = req.body || {};
     const scheduledDate = scheduled_at ? new Date(scheduled_at) : null;
@@ -236,6 +242,11 @@ Router.post('/logs/retry-bulk', auth, asyncMiddleware(async (req, res) => {
         if (!log) {
             results.skipped++;
             results.items.push({ log_id: Number(inputId), outcome: 'skipped', reason: 'not_failed_or_not_found' });
+            continue;
+        }
+        if (messaging.isPossiblySent(log)) {
+            results.skipped++;
+            results.items.push({ log_id: log.log_id, outcome: 'skipped', reason: 'possibly_sent' });
             continue;
         }
 

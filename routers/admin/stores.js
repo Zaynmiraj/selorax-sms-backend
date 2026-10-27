@@ -79,8 +79,12 @@ Router.get('/:storeId', asyncMiddleware(async (req, res) => {
 Router.patch('/:storeId/sms-price', requireRole('super_admin'), asyncMiddleware(async (req, res) => {
     const storeId = Number(req.params.storeId);
     if (!storeId) return res.status(400).send({ message: 'Invalid store id.', status: 400 });
+    // Must be explicit: a body without the field must not silently reset the price.
+    if (!req.body || !Object.prototype.hasOwnProperty.call(req.body, 'unit_price')) {
+        return res.status(400).send({ message: 'unit_price is required (null resets to the default).', status: 400, code: 'invalid_price' });
+    }
     try {
-        const { previous, value } = await pricing.setStoreUnitPrice(storeId, req.body?.unit_price);
+        const { previous, value } = await pricing.setStoreUnitPrice(storeId, req.body.unit_price);
         console.log(`[SMS Admin] price change: store ${storeId} ${previous ?? 'default'} → ${value ?? 'default'} by admin ${req.admin.admin_id}`);
         const effective = await pricing.getStoreUnitPrice(storeId);
         return res.send({

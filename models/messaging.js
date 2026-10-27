@@ -320,6 +320,15 @@ async function sendSms(store_id, installation_id, phone, message, { event_topic,
     };
 }
 
+/** A failed log whose send timed out — the SMS may have gone out anyway. */
+function isPossiblySent(log) {
+    let pr = log?.provider_response;
+    if (typeof pr === 'string') {
+        try { pr = JSON.parse(pr); } catch { pr = null; }
+    }
+    return pr?.indeterminate === true;
+}
+
 /**
  * Get paginated SMS logs
  */
@@ -473,5 +482,6 @@ module.exports = {
     getPlatformWebhookSigningSecrets,
     normalizeWebhookSigningSecrets,
     validateDatabaseIdentifier,
+    isPossiblySent,
     ensureWebhookSigningSecret,
 };

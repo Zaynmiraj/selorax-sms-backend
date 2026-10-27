@@ -2,6 +2,8 @@ const campaigns = require('../models/messaging-campaigns');
 const messaging = require('../models/messaging');
 const wallet = require('../models/messaging-wallet');
 const { connection } = require('../startup/db');
+const platformSms = require('./sms-providers/platform');
+const { SYSTEMIC_ERRORS } = platformSms;
 
 const BATCH_SIZE = 20;
 const POLL_INTERVAL_MS = 5000;
@@ -12,6 +14,8 @@ let pollInFlight = false;
  * Process active sending campaigns — called by poll interval.
  */
 async function processCampaigns() {
+    // Sending is not set up: leave campaigns and recipients untouched.
+    if (!platformSms.isConfigured()) return;
     const [active] = await connection.promise().query(
         `SELECT * FROM app_messaging_campaigns
          WHERE (status = 'sending')
@@ -99,6 +103,12 @@ async function processSingleCampaign(campaign) {
                 { event_topic: 'campaign', resource_id: String(campaign.campaign_id) }
             );
 
+            if (!result.success && !result.indeterminate && SYSTEMIC_ERRORS.has(result.error)) {
+                // Platform down/misconfigured for everyone: keep this and the
+                // remaining recipients pending and retry on a later tick.
+                console.warn(`[Campaign] ${campaign.campaign_id} paused this tick: ${result.error}`);
+                break;
+            }
             await campaigns.updateRecipientStatus(
                 recipient.recipient_id,
                 result.success ? 'sent' : 'failed',

@@ -164,11 +164,13 @@ Router.post('/receive', asyncMiddleware(async (req, res) => {
         return res.status(200).send({ message: `Invalid phone number: ${rawPhone}`, status: 200 });
     }
 
-    // Duplicate prevention — skip if same SMS was already sent for this order+event in the last 5 min
+    // Duplicate prevention — skip if same SMS was already sent (or MAY have been:
+    // an `indeterminate` failure) for this order+event in the last 5 min
     const orderId = order.order_id || order.id;
     const [dupeRows] = await connection.promise().query(/*sql*/`
         SELECT log_id FROM app_messaging_logs
-        WHERE store_id = ? AND event_topic = ? AND resource_id = ? AND status = 'sent'
+        WHERE store_id = ? AND event_topic = ? AND resource_id = ?
+          AND (status = 'sent' OR JSON_UNQUOTE(JSON_EXTRACT(provider_response, '$.indeterminate')) = 'true')
           AND created_at > DATE_SUB(NOW(), INTERVAL 5 MINUTE)
         LIMIT 1
     `, [store_id, eventKey, orderId]);

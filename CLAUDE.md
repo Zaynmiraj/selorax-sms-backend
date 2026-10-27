@@ -93,14 +93,22 @@ checks credits, sends, logs, and deducts only on success, exactly as before.
   charged to us). Failures carry an `error` code (`no_sender_id`, `platform_insufficient_funds`,
   `sending_unavailable`, `invalid_receiver`, `suppressed`, `rate_limited`, `auth_failed`,
   `network_error`, …) which `models/messaging.js` `sendSms()` now returns to callers.
-- Up to 3 attempts on timeout / network error / 5xx / 409 with the **same `Idempotency-Key`** —
-  the platform replays or never recorded it, so these retries cannot double-send. Timeout is 60 s,
-  deliberately ABOVE the platform's 30 s gateway timeout.
-- **`indeterminate`** (still timing out, still 409/502-504, or a 200 we could not read): the SMS
-  may have gone out. It is logged `failed`, not billed, and `sendSms()` returns
-  `indeterminate: true` — the scheduler does **not** retry it (a retry has a new key and could send
-  twice), nor `PERMANENT_ERRORS` (`no_sender_id`, `invalid_receiver`, …). Campaign recipients store
-  the real error code.
+- Up to 3 attempts (max 2 timeouts) with the **same `Idempotency-Key`** on timeout / network
+  error / 5xx / 409 — the platform replays or never recorded it, so these retries cannot
+  double-send. Timeout 40 s, deliberately ABOVE the platform's 30 s gateway timeout.
+- Outcome classes (`services/sms-providers/platform.js`):
+  - **`indeterminate`** (timeout/dropped connection, final 409/504, unreadable 200): MAY have gone
+    out. Logged `failed`, not billed, `sendSms()` returns `indeterminate: true`; never
+    auto-retried, counted as "sent" by the webhook 5-min dedupe, and the manual retry routes refuse
+    it (`409 possibly_sent`; bulk skips it).
+  - **`SYSTEMIC_ERRORS`** (`not_configured`, `auth_failed`, `platform_unreachable` = never
+    connected, `platform_unavailable` = 502/503/404, `platform_error`, `sending_unavailable`, …):
+    nothing sent, nothing billed. The scheduler re-queues the job in 2 min **without spending an
+    attempt**; the campaign sender leaves recipients `pending` for a later tick. Both pollers do
+    nothing while `MESSAGING_PLATFORM_URL`/`_API_KEY` are unset — so a deploy before the platform
+    is ready HOLDS queued SMS instead of failing them. (Webhook/instant sends during an outage
+    still fail — the order event is gone.)
+  - **`PERMANENT_ERRORS`** (`invalid_receiver`, `suppressed`): failed at once, never retried.
 - Campaign sends (`event_topic: 'campaign'`) go as `promotional: true`.
 - Install/uninstall (`routers/oauth.js`) best-effort `PUT /api/v1/stores/{store_id}` with the
   store's name/domain and `active` so it shows up in the platform admin.

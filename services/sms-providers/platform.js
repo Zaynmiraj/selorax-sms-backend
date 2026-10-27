@@ -19,8 +19,14 @@ const crypto = require('crypto');
 
 // Must stay ABOVE the platform's own gateway timeout (30 s): giving up first
 // would record a failure for an SMS the platform then sends and bills.
-const TIMEOUT_MS = 60000;
+const TIMEOUT_MS = 40000;
 const MAX_ATTEMPTS = 3;
+// After a timeout, ask at most once more (same key → the platform replays or
+// says it is still working); never wait 3 × 40 s on a hung platform.
+const MAX_TIMEOUTS = 2;
+
+// The connection never got made: the SMS definitely did NOT go out.
+const CONNECT_ERRORS = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH']);
 const GSM7_REGEX = /^[@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞ ÆæßÉ !"#¤%&'()*+,\-./0-9:;<=>?¡A-ZÄÖÑÜa-zäöñüà^{}\\[\]~|€]*$/;
 
 // Platform error `type` → our own code. Anything unlisted becomes `send_rejected`.
@@ -79,18 +85,26 @@ function isRetryable(status) {
 }
 
 // Still unresolved after the last attempt = the SMS may or may not have gone
-// out: 409 (platform still processing it) or a proxy-level 502/503/504.
+// out: 409 (platform still processing it) or a proxy gateway timeout (504).
+// A 502/503 means the request never reached a working platform: not sent.
 function isIndeterminate(status) {
-    return status === 409 || status === 502 || status === 503 || status === 504;
+    return status === 409 || status === 504;
 }
 
 /**
- * Errors that will fail again on retry (configuration or the number itself).
- * The scheduler does not retry these.
+ * About the NUMBER itself — retrying can never help. Everything else
+ * (configuration, platform down, no sender yet, …) is fixable and retried.
  */
-const PERMANENT_ERRORS = new Set([
-    'no_sender_id', 'invalid_receiver', 'suppressed', 'auth_failed', 'not_configured',
-    'sending_unavailable', 'pricing_unavailable', 'send_rejected',
+const PERMANENT_ERRORS = new Set(['invalid_receiver', 'suppressed']);
+
+/**
+ * The platform/link is unusable for EVERY store right now (misconfigured,
+ * down, out of service). Callers should hold the work and try later instead
+ * of failing it: nothing was sent and nothing was charged.
+ */
+const SYSTEMIC_ERRORS = new Set([
+    'not_configured', 'auth_failed', 'platform_unreachable', 'platform_unavailable', 'platform_error',
+    'sending_unavailable', 'pricing_unavailable', 'platform_insufficient_funds', 'rate_limited',
 ]);
 
 function fail(error, extra = {}) {
@@ -121,24 +135,38 @@ async function sendSms(phone, message, { event_topic, store_id } = {}) {
 
     let res = null;
     let lastError = null;
+    let everReached = false; // did ANY attempt possibly reach the platform?
+    let timeouts = 0;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
         try {
             res = await request('POST', '/api/v1/messages', body, { idempotencyKey });
             lastError = null;
+            everReached = true;
             if (!isRetryable(res.status)) break;
         } catch (err) {
             res = null;
             lastError = err;
+            const code = err?.cause?.code || err?.code;
+            if (!CONNECT_ERRORS.has(code)) everReached = true;
+            if (err?.name === 'TimeoutError' && ++timeouts >= MAX_TIMEOUTS) break;
         }
         if (attempt < MAX_ATTEMPTS) {
             await new Promise((r) => setTimeout(r, res?.status === 409 ? 3000 : 500 * attempt));
         }
     }
 
+    if (!res && !everReached) {
+        // Never connected: definitely not sent, safe to try again later.
+        return fail('platform_unreachable', {
+            reason: redactKey(lastError?.cause?.code || lastError?.message),
+            idempotency_key: idempotencyKey,
+        });
+    }
+
     if (!res) {
-        // Timeout / network error on every attempt: the platform MAY have sent
-        // it. Not billed here, flagged `indeterminate` so nothing auto-retries
-        // it (a retry uses a new key and could send it twice).
+        // Timeout / dropped connection: the platform MAY have sent it. Not
+        // billed here, flagged `indeterminate` so nothing auto-retries it (a
+        // retry uses a new key and could send it twice).
         return fail('network_error', {
             indeterminate: true,
             reason: redactKey(lastError?.name === 'TimeoutError' ? 'timeout' : lastError?.message),
@@ -161,7 +189,11 @@ async function sendSms(phone, message, { event_topic, store_id } = {}) {
     }
     if (status !== 200) {
         const type = data?.error?.type;
-        return fail(ERROR_CODES[type] || (status >= 500 ? 'platform_error' : 'send_rejected'), {
+        const fallback = status === 502 || status === 503 ? 'platform_unavailable'
+            : status >= 500 ? 'platform_error'
+                : status === 404 ? 'platform_unavailable' // wrong URL / platform not deployed
+                    : 'send_rejected';
+        return fail(ERROR_CODES[type] || fallback, {
             http_status: status,
             type: type || null,
             reason: redactKey(data?.error?.message || ''),
@@ -207,4 +239,4 @@ async function registerStore(store_id, { name, domain, active } = {}) {
     }
 }
 
-module.exports = { sendSms, registerStore, isConfigured, ERROR_CODES, PERMANENT_ERRORS };
+module.exports = { sendSms, registerStore, isConfigured, ERROR_CODES, PERMANENT_ERRORS, SYSTEMIC_ERRORS };

@@ -149,3 +149,35 @@ test('not configured → fails without calling out', async () => {
     assert.equal(res.provider_response.error, 'not_configured');
     assert.equal(calls.length, 0);
 });
+
+test('connection refused on every attempt → definitely not sent, NOT indeterminate', async () => {
+    const refused = () => Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } });
+    mockFetch(refused(), refused(), refused());
+    const res = await platform.sendSms('01760505055', 'x', { store_id: 1 });
+    assert.equal(res.provider_response.error, 'platform_unreachable');
+    assert.equal(res.provider_response.indeterminate, undefined);
+    assert.ok(platform.SYSTEMIC_ERRORS.has('platform_unreachable'));
+});
+
+test('stops after two timeouts (no 3 × 40 s wait on a hung platform)', async () => {
+    const timeout = () => Object.assign(new Error('aborted'), { name: 'TimeoutError' });
+    mockFetch(timeout(), timeout(), { status: 200, body: sentBody });
+    const res = await platform.sendSms('01760505055', 'x', { store_id: 1 });
+    assert.equal(calls.length, 2);
+    assert.equal(res.provider_response.indeterminate, true);
+});
+
+test('a 502/503 from the proxy is "platform unavailable": not sent, not indeterminate', async () => {
+    const down = { status: 503, body: null };
+    mockFetch(down, down, down);
+    const res = await platform.sendSms('01760505055', 'x', { store_id: 1 });
+    assert.equal(res.provider_response.error, 'platform_unavailable');
+    assert.equal(res.provider_response.indeterminate, undefined);
+});
+
+test('only number-specific errors are permanent; config/outage errors are retried', () => {
+    assert.deepEqual([...platform.PERMANENT_ERRORS].sort(), ['invalid_receiver', 'suppressed']);
+    for (const code of ['not_configured', 'auth_failed', 'sending_unavailable', 'platform_error']) {
+        assert.ok(platform.SYSTEMIC_ERRORS.has(code), code);
+    }
+});
