@@ -26,7 +26,12 @@ const MAX_ATTEMPTS = 3;
 const MAX_TIMEOUTS = 2;
 
 // The connection never got made: the SMS definitely did NOT go out.
-const CONNECT_ERRORS = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH']);
+// (Node/undici codes, TLS handshake failures, and Bun's spelling.)
+const CONNECT_ERRORS = new Set([
+    'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH', 'UND_ERR_CONNECT_TIMEOUT',
+    'CERT_HAS_EXPIRED', 'ERR_TLS_CERT_ALTNAME_INVALID', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+    'DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN', 'ConnectionRefused',
+]);
 const GSM7_REGEX = /^[@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞ ÆæßÉ !"#¤%&'()*+,\-./0-9:;<=>?¡A-ZÄÖÑÜa-zäöñüà^{}\\[\]~|€]*$/;
 
 // Platform error `type` → our own code. Anything unlisted becomes `send_rejected`.
@@ -40,6 +45,13 @@ const ERROR_CODES = {
     rate_limited: 'rate_limited',
     unauthorized: 'auth_failed',
 };
+
+// A 422 invalid_request is only ever the platform refusing `store_ref` /
+// `promotional` because our org is not (yet) a partner — systemic.
+function codeForError(status, type) {
+    if (status === 422 && type === 'invalid_request') return 'partner_not_enabled';
+    return ERROR_CODES[type] || null;
+}
 
 function baseUrl() {
     return (process.env.MESSAGING_PLATFORM_URL || '').replace(/\/+$/, '');
@@ -103,7 +115,7 @@ const PERMANENT_ERRORS = new Set(['invalid_receiver', 'suppressed']);
  * of failing it: nothing was sent and nothing was charged.
  */
 const SYSTEMIC_ERRORS = new Set([
-    'not_configured', 'auth_failed', 'platform_unreachable', 'platform_unavailable', 'platform_error',
+    'not_configured', 'auth_failed', 'partner_not_enabled', 'platform_unreachable', 'platform_unavailable', 'platform_error',
     'sending_unavailable', 'pricing_unavailable', 'platform_insufficient_funds', 'rate_limited',
 ]);
 
@@ -136,22 +148,27 @@ async function sendSms(phone, message, { event_topic, store_id } = {}) {
     let res = null;
     let lastError = null;
     let everReached = false; // did ANY attempt possibly reach the platform?
+    let maybeSent = false;   // did an earlier attempt end without a definite answer?
     let timeouts = 0;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
         try {
             res = await request('POST', '/api/v1/messages', body, { idempotencyKey });
             lastError = null;
             everReached = true;
-            if (!isRetryable(res.status)) break;
+            if (!isRetryable(res.status) && res.status !== 429) break;
+            if (isIndeterminate(res.status)) maybeSent = true;
         } catch (err) {
             res = null;
             lastError = err;
             const code = err?.cause?.code || err?.code;
-            if (!CONNECT_ERRORS.has(code)) everReached = true;
+            if (!CONNECT_ERRORS.has(code)) {
+                everReached = true;
+                maybeSent = true;
+            }
             if (err?.name === 'TimeoutError' && ++timeouts >= MAX_TIMEOUTS) break;
         }
         if (attempt < MAX_ATTEMPTS) {
-            await new Promise((r) => setTimeout(r, res?.status === 409 ? 3000 : 500 * attempt));
+            await new Promise((r) => setTimeout(r, res?.status === 409 || res?.status === 429 ? 3000 : 500 * attempt));
         }
     }
 
@@ -175,7 +192,12 @@ async function sendSms(phone, message, { event_topic, store_id } = {}) {
     }
 
     const { status, data } = res;
-    if (status !== 200 && isIndeterminate(status)) {
+    // An earlier attempt may have gone through, and this final answer does not
+    // settle it: a 5xx/429/404 comes from in front of the idempotency record,
+    // so it says nothing about whether that earlier attempt sent the SMS.
+    // (A replayed business error — 4xx with an error type — DOES settle it.)
+    const unsettling = status >= 500 || status === 429 || status === 404;
+    if (status !== 200 && (isIndeterminate(status) || (maybeSent && unsettling))) {
         return fail('platform_pending', {
             indeterminate: true,
             http_status: status,
@@ -189,11 +211,12 @@ async function sendSms(phone, message, { event_topic, store_id } = {}) {
     }
     if (status !== 200) {
         const type = data?.error?.type;
+        const mapped = codeForError(status, type);
         const fallback = status === 502 || status === 503 ? 'platform_unavailable'
             : status >= 500 ? 'platform_error'
                 : status === 404 ? 'platform_unavailable' // wrong URL / platform not deployed
                     : 'send_rejected';
-        return fail(ERROR_CODES[type] || fallback, {
+        return fail(mapped || fallback, {
             http_status: status,
             type: type || null,
             reason: redactKey(data?.error?.message || ''),
@@ -214,7 +237,8 @@ async function sendSms(phone, message, { event_topic, store_id } = {}) {
         batch_id: data?.batch_id || null,
         sender_id: data?.from || null,
         segments: msg?.segments ?? null,
-        price: msg?.price ?? null,
+        // (The platform's per-SMS price is deliberately NOT stored: logs are
+        // shown to merchants and it is SeloraX's wholesale cost.)
         ...(success ? {} : { error: skipped ? 'suppressed' : 'send_rejected' }),
     };
     return { success, sms_type, provider_response };

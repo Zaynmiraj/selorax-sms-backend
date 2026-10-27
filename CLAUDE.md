@@ -101,13 +101,21 @@ checks credits, sends, logs, and deducts only on success, exactly as before.
     out. Logged `failed`, not billed, `sendSms()` returns `indeterminate: true`; never
     auto-retried, counted as "sent" by the webhook 5-min dedupe, and the manual retry routes refuse
     it (`409 possibly_sent`; bulk skips it).
-  - **`SYSTEMIC_ERRORS`** (`not_configured`, `auth_failed`, `platform_unreachable` = never
-    connected, `platform_unavailable` = 502/503/404, `platform_error`, `sending_unavailable`, …):
-    nothing sent, nothing billed. The scheduler re-queues the job in 2 min **without spending an
-    attempt**; the campaign sender leaves recipients `pending` for a later tick. Both pollers do
-    nothing while `MESSAGING_PLATFORM_URL`/`_API_KEY` are unset — so a deploy before the platform
-    is ready HOLDS queued SMS instead of failing them. (Webhook/instant sends during an outage
-    still fail — the order event is gone.)
+  - **`SYSTEMIC_ERRORS`** (`not_configured`, `auth_failed`, `partner_not_enabled` = 422 on
+    store_ref, `platform_unreachable` = never connected incl. TLS/connect timeout,
+    `platform_unavailable` = 502/503/404, `platform_error`, `rate_limited`, `sending_unavailable`, …):
+    nothing sent, nothing billed. Callers that pass `holdOnSystemic` (scheduler, campaign sender,
+    order webhook) get `{ held: true }` and **no log row is written** — so an outage never leaves
+    retryable "failed" rows a merchant could resend. The scheduler re-queues in 2 min without
+    spending an attempt (gives up after 24 h); campaigns keep recipients `pending` and pause 60 s;
+    an instant order webhook is queued as a scheduler job instead of being lost. Both pollers idle
+    while `MESSAGING_PLATFORM_URL`/`_API_KEY` are unset. Manual sends report the error.
+  - An earlier timeout/409/dropped connection followed by a final 5xx/429/404 is still
+    `indeterminate` (that answer can't prove the first attempt didn't send).
+  - Scheduler jobs stuck `processing` for 60 min (restart mid-send) are finished as `failed`
+    ("may have been sent"), never resent. `/send` answers `202 possibly_sent`, `/internal/send-sms`
+    `code: possibly_sent`, for indeterminate outcomes.
+  - The platform's per-SMS price is NOT stored in `provider_response` (merchants can read logs).
   - **`PERMANENT_ERRORS`** (`invalid_receiver`, `suppressed`): failed at once, never retried.
 - Campaign sends (`event_topic: 'campaign'`) go as `promotional: true`.
 - Install/uninstall (`routers/oauth.js`) best-effort `PUT /api/v1/stores/{store_id}` with the

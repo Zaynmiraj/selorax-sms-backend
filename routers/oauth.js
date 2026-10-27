@@ -23,7 +23,12 @@ async function storeDetails(store_id) {
         const [rows] = await connection.promise().query(
             `SELECT name, domain FROM \`${platformDb}\`.stores WHERE store_id = ?`, [store_id]
         );
-        return rows[0] ? { name: rows[0].name || null, domain: rows[0].domain || null } : {};
+        if (!rows[0]) return {};
+        // Only send what we know — a null would wipe a name already on the platform.
+        const out = {};
+        if (rows[0].name) out.name = rows[0].name;
+        if (rows[0].domain) out.domain = rows[0].domain;
+        return out;
     } catch {
         return {};
     }

@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const { connection } = require('../startup/db');
 const { resolveProvider } = require('../services/sms-providers');
+const { SYSTEMIC_ERRORS } = require('../services/sms-providers/platform');
 
 const GSM7_REGEX = /^[@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞ ÆæßÉ !"#¤%&'()*+,\-.\/0-9:;<=>?¡A-ZÄÖÑÜa-zäöñüà^{}\\[\\]~|€]*$/;
 
@@ -249,7 +250,7 @@ function renderTemplate(templateText, variables = {}) {
  * Core send SMS function.
  * Checks SMS credits → sends via provider → deducts calculated credits → logs result.
  */
-async function sendSms(store_id, installation_id, phone, message, { event_topic, resource_id, source_app, metadata } = {}) {
+async function sendSms(store_id, installation_id, phone, message, { event_topic, resource_id, source_app, metadata, holdOnSystemic = false } = {}) {
     const wallet = require('./messaging-wallet');
 
     // Check SMS credits
@@ -263,6 +264,15 @@ async function sendSms(store_id, installation_id, phone, message, { event_topic,
     // platform (services/sms-providers/platform.js); this app only says which
     // store the SMS is for.
     const result = await resolveProvider().sendSms(phone, message, { event_topic, store_id });
+
+    // The caller (scheduler, campaign, webhook) will hold this and try again
+    // later: nothing was sent or charged, so write NO log row — otherwise every
+    // retry during an outage leaves a "failed" row a merchant could resend.
+    const errorCode = result.provider_response?.error;
+    if (!result.success && holdOnSystemic && !result.provider_response?.indeterminate
+        && SYSTEMIC_ERRORS.has(errorCode)) {
+        return { success: false, error: errorCode, held: true, log_id: null, sms_credits: credits };
+    }
 
     // `meta` is load-bearing: retry bookkeeping reads $.meta.metadata.
     const enrichedProviderResponse = {

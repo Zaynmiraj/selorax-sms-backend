@@ -229,8 +229,18 @@ Router.post('/receive', asyncMiddleware(async (req, res) => {
         settings.installation_id,
         phone,
         renderedMessage,
-        { event_topic: eventKey, resource_id: order.order_id || order.id }
+        { event_topic: eventKey, resource_id: order.order_id || order.id, holdOnSystemic: true }
     );
+
+    if (result.held) {
+        // Platform unusable right now: don't lose the order SMS — queue it.
+        const jobId = await scheduler.scheduleJob(
+            store_id, settings.installation_id, phone, renderedMessage, new Date(Date.now() + 2 * 60 * 1000),
+            { event_topic: eventKey, resource_id: orderId }
+        );
+        console.warn(`[Webhook] ${eventKey} → platform unavailable (${result.error}), queued as job ${jobId} for store ${store_id}`);
+        return res.status(200).send({ message: 'SMS queued.', data: { scheduled: true, job_id: jobId }, status: 200 });
+    }
 
     console.log(`[Webhook] ${eventKey} → SMS ${result.success ? 'sent' : 'failed'} to ${phone} for store ${store_id}`);
 

@@ -115,7 +115,9 @@ Router.post('/quick-send', auth, asyncMiddleware(async (req, res) => {
     if (!result.success) {
         const reason = result.error === 'insufficient_balance'
             ? `Not enough SMS credits (${result.sms_credits} left).`
-            : (result.error || 'Failed to send SMS.');
+            : result.indeterminate
+                ? 'The SMS may have been sent (the send timed out). Check the SMS history before sending again.'
+                : 'Failed to send SMS. Please try again shortly.';
         return res.send({
             show_toast: { type: 'error', message: reason },
             update_state: { sending: false },

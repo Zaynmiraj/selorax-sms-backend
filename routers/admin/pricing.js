@@ -22,6 +22,9 @@ Router.put('/', requireRole('super_admin'), asyncMiddleware(async (req, res) => 
         return res.send({ status: 200, default_unit_price: Number(value) });
     } catch (e) {
         if (e.code === 'invalid_price') return res.status(400).send({ message: e.message, status: 400, code: e.code });
+        if (e.code === 'ER_NO_SUCH_TABLE' || e.code === 'ER_BAD_FIELD_ERROR') {
+            return res.status(503).send({ message: 'Pricing is not set up yet: database migration 013 has not been applied.', status: 503, code: 'migration_required' });
+        }
         throw e;
     }
 }));

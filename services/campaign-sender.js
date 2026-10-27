@@ -9,13 +9,15 @@ const BATCH_SIZE = 20;
 const POLL_INTERVAL_MS = 5000;
 let pollInterval = null;
 let pollInFlight = false;
+let pausedUntil = 0; // set when the platform is found unusable
 
 /**
  * Process active sending campaigns — called by poll interval.
  */
 async function processCampaigns() {
-    // Sending is not set up: leave campaigns and recipients untouched.
-    if (!platformSms.isConfigured()) return;
+    // Sending is not set up, or the platform was just found unusable: leave
+    // campaigns and recipients untouched.
+    if (!platformSms.isConfigured() || Date.now() < pausedUntil) return;
     const [active] = await connection.promise().query(
         `SELECT * FROM app_messaging_campaigns
          WHERE (status = 'sending')
@@ -80,7 +82,8 @@ async function processSingleCampaign(campaign) {
             return;
         }
 
-        const hasCredits = await wallet.hasCredits(campaign.store_id, 1);
+        // A long message costs several credits per recipient.
+        const hasCredits = await wallet.hasCredits(campaign.store_id, messaging.calculateSmsParts(campaign.message));
         if (!hasCredits) {
             console.warn(`[Campaign] ${campaign.campaign_id} — out of credits, completing with remaining failed`);
             // Mark all remaining pending recipients as failed
@@ -100,13 +103,14 @@ async function processSingleCampaign(campaign) {
                 campaign.installation_id,
                 recipient.phone,
                 campaign.message,
-                { event_topic: 'campaign', resource_id: String(campaign.campaign_id) }
+                { event_topic: 'campaign', resource_id: String(campaign.campaign_id), holdOnSystemic: true }
             );
 
-            if (!result.success && !result.indeterminate && SYSTEMIC_ERRORS.has(result.error)) {
+            if (result.held) {
                 // Platform down/misconfigured for everyone: keep this and the
-                // remaining recipients pending and retry on a later tick.
-                console.warn(`[Campaign] ${campaign.campaign_id} paused this tick: ${result.error}`);
+                // remaining recipients pending and pause campaigns for a minute.
+                console.warn(`[Campaign] ${campaign.campaign_id} paused: ${result.error}`);
+                pausedUntil = Date.now() + 60 * 1000;
                 break;
             }
             await campaigns.updateRecipientStatus(

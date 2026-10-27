@@ -181,3 +181,40 @@ test('only number-specific errors are permanent; config/outage errors are retrie
         assert.ok(platform.SYSTEMIC_ERRORS.has(code), code);
     }
 });
+
+test('a timeout followed by a 503 stays indeterminate (the first attempt may have sent it)', async () => {
+    const timeout = Object.assign(new Error('aborted'), { name: 'TimeoutError' });
+    mockFetch(timeout, { status: 503, body: null }, { status: 503, body: null });
+    const res = await platform.sendSms('01760505055', 'x', { store_id: 1 });
+    assert.equal(res.provider_response.indeterminate, true);
+});
+
+test('a connect timeout or expired certificate is "unreachable" (never sent), not indeterminate', async () => {
+    for (const code of ['UND_ERR_CONNECT_TIMEOUT', 'CERT_HAS_EXPIRED', 'ConnectionRefused']) {
+        const err = () => Object.assign(new TypeError('fetch failed'), { cause: { code } });
+        mockFetch(err(), err(), err());
+        const res = await platform.sendSms('01760505055', 'x', { store_id: 1 });
+        assert.equal(res.provider_response.error, 'platform_unreachable', code);
+        assert.equal(res.provider_response.indeterminate, undefined, code);
+    }
+});
+
+test('422 invalid_request (store_ref refused: org not a partner) is systemic partner_not_enabled', async () => {
+    mockFetch({ status: 422, body: { error: { type: 'invalid_request', message: "'store_ref' is only available to partner accounts." } } });
+    const res = await platform.sendSms('01760505055', 'x', { store_id: 1 });
+    assert.equal(res.provider_response.error, 'partner_not_enabled');
+    assert.ok(platform.SYSTEMIC_ERRORS.has('partner_not_enabled'));
+});
+
+test('a 429 is retried with the same key', async () => {
+    mockFetch({ status: 429, body: { error: { type: 'rate_limited', message: 'slow down' } } }, { status: 200, body: sentBody });
+    const res = await platform.sendSms('01760505055', 'x', { store_id: 1 });
+    assert.equal(res.success, true);
+    assert.equal(calls[0].init.headers['Idempotency-Key'], calls[1].init.headers['Idempotency-Key']);
+});
+
+test('the platform price (our wholesale cost) is not stored in provider_response', async () => {
+    mockFetch({ status: 200, body: sentBody });
+    const res = await platform.sendSms('01760505055', 'x', { store_id: 1 });
+    assert.equal('price' in res.provider_response, false);
+});

@@ -100,6 +100,14 @@ async function processDueJobs() {
     }
     warnedNotConfigured = false;
 
+    // A job left 'processing' for an hour was interrupted (restart mid-send):
+    // it MAY have been sent, so finish it as failed — never resend it blindly.
+    await connection.promise().query(/*sql*/`
+        UPDATE app_messaging_scheduled
+        SET status = 'failed', last_error = 'interrupted during send (may have been sent)', processed_at = NOW()
+        WHERE status = 'processing' AND scheduled_at < DATE_SUB(NOW(), INTERVAL 60 MINUTE)
+    `);
+
     // Atomic claim: mark due pending jobs as 'processing' in one UPDATE and
     // tag them with a unique claim token in `last_error` so we can then
     // SELECT exactly the rows we just claimed. This eliminates the
@@ -143,7 +151,7 @@ async function processDueJobs() {
                 job.installation_id,
                 job.phone,
                 job.message,
-                { event_topic: job.event_topic, resource_id: job.resource_id }
+                { event_topic: job.event_topic, resource_id: job.resource_id, holdOnSystemic: true }
             );
 
             if (result.success) {
@@ -157,7 +165,7 @@ async function processDueJobs() {
                 // what cannot succeed (bad number, no sender ID, …).
                 const final = result.indeterminate || PERMANENT_ERRORS.has(result.error);
                 // Platform-wide outage/misconfig: hold the job, don't spend an attempt.
-                const systemic = !final && SYSTEMIC_ERRORS.has(result.error);
+                const systemic = !final && (result.held || SYSTEMIC_ERRORS.has(result.error));
                 await handleJobFailure(job, result.error || 'SMS send failed', { final, systemic });
             }
         } catch (err) {
@@ -170,7 +178,10 @@ async function processDueJobs() {
  * Handle a failed job — retry with exponential backoff or mark as failed
  */
 async function handleJobFailure(job, errorMsg, { final = false, systemic = false } = {}) {
-    if (systemic) {
+    // Held for a platform outage — but not forever: an order SMS a day late is
+    // worse than none.
+    const tooOld = job.created_at && Date.now() - new Date(job.created_at).getTime() > 24 * 3600 * 1000;
+    if (systemic && !tooOld) {
         await connection.promise().query(/*sql*/`
             UPDATE app_messaging_scheduled
             SET status = 'pending', last_error = ?, scheduled_at = DATE_ADD(NOW(), INTERVAL 2 MINUTE)
@@ -181,7 +192,7 @@ async function handleJobFailure(job, errorMsg, { final = false, systemic = false
     }
     const newAttempts = (job.attempts || 0) + 1;
 
-    if (final || newAttempts >= (job.max_attempts || 3)) {
+    if (final || systemic || newAttempts >= (job.max_attempts || 3)) {
         // Max retries reached — mark as failed
         await connection.promise().query(/*sql*/`
             UPDATE app_messaging_scheduled

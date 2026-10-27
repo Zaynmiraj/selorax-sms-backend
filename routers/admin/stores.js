@@ -97,6 +97,9 @@ Router.patch('/:storeId/sms-price', requireRole('super_admin'), asyncMiddleware(
         if (e.code === 'invalid_price' || e.code === 'store_not_installed') {
             return res.status(e.status).send({ message: e.message, status: e.status, code: e.code });
         }
+        if (e.code === 'ER_NO_SUCH_TABLE' || e.code === 'ER_BAD_FIELD_ERROR') {
+            return res.status(503).send({ message: 'Pricing is not set up yet: database migration 013 has not been applied.', status: 503, code: 'migration_required' });
+        }
         throw e;
     }
 }));

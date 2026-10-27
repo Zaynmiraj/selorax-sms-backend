@@ -80,7 +80,8 @@ Router.post('/send-sms', internalAuth, asyncMiddleware(async (req, res) => {
     if (!result.success) {
         return res.status(200).send({
             success: false,
-            code: result.error || 'send_failed',
+            // possibly_sent = it timed out and MAY have gone out: don't resend.
+            code: result.indeterminate ? 'possibly_sent' : (result.error || 'send_failed'),
             data: { sms_credits: result.sms_credits },
             status: 200,
         });

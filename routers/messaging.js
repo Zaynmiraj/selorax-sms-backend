@@ -110,6 +110,15 @@ Router.post('/send', auth, asyncMiddleware(async (req, res) => {
         });
     }
 
+    if (result.indeterminate) {
+        return res.status(202).send({
+            message: 'The SMS may have been sent — the send timed out. Check the logs before sending it again.',
+            code: 'possibly_sent',
+            data: result,
+            status: 202,
+        });
+    }
+
     const httpStatus = result.success ? 200 : 500;
     res.status(httpStatus).send({
         message: result.success ? 'SMS sent successfully.' : 'SMS sending failed.',
