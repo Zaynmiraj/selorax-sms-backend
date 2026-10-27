@@ -1,5 +1,6 @@
 /**
- * /api/admin/stores — list stores that use the app and manage their SMS credits.
+ * /api/admin/stores — list stores that use the app and manage their SMS credits
+ * and their price per SMS (custom purchases; models/sms-pricing.js).
  * Sender IDs and gateways are NOT managed here: they are set per store in the
  * SeloraX Messages platform admin (this app sends through it as a partner).
  */
@@ -9,6 +10,7 @@ const { connection } = require('../../startup/db');
 const asyncMiddleware = require('../../middlewares/asyncMiddleware');
 const { requireRole } = require('../../middlewares/smsAdminAuth');
 const { validateDatabaseIdentifier } = require('../../models/messaging');
+const pricing = require('../../models/sms-pricing');
 
 const db = connection.promise();
 
@@ -28,7 +30,9 @@ async function enrichNames(storeIds) {
     return names;
 }
 
-function serializeStore(row, names) {
+function serializeStore(row, names, defaultPrice) {
+    // `sms_unit_price` is undefined until migration 013 runs — same as "no own price".
+    const own = row.sms_unit_price === null || row.sms_unit_price === undefined ? null : Number(row.sms_unit_price);
     return {
         store_id: row.store_id,
         name: names[row.store_id]?.name || null,
@@ -36,35 +40,61 @@ function serializeStore(row, names) {
         sms_credits: Number(row.sms_credits) || 0,
         is_enabled: !!row.is_enabled,
         auto_sms_enabled: !!row.auto_sms_enabled,
+        sms_unit_price: own,
+        effective_unit_price: Number(pricing.resolveUnitPrice(own, defaultPrice)),
     };
 }
 
 Router.get('/', asyncMiddleware(async (req, res) => {
+    // SELECT * so this keeps working before migration 013 adds sms_unit_price.
     const [rows] = await db.query(/*sql*/`
-        SELECT store_id, sms_credits, is_enabled, auto_sms_enabled
-        FROM app_messaging_settings ORDER BY store_id ASC
+        SELECT * FROM app_messaging_settings ORDER BY store_id ASC
     `);
-    const names = await enrichNames(rows.map(r => r.store_id));
+    const [names, defaultPrice] = await Promise.all([
+        enrichNames(rows.map(r => r.store_id)),
+        pricing.getDefaultUnitPrice(),
+    ]);
     return res.send({
         status: 200,
-        stores: rows.map(r => serializeStore(r, names)),
+        stores: rows.map(r => serializeStore(r, names, defaultPrice)),
+        default_unit_price: Number(defaultPrice),
     });
 }));
 
 Router.get('/:storeId', asyncMiddleware(async (req, res) => {
     const storeId = Number(req.params.storeId);
     if (!storeId) return res.status(400).send({ message: 'Invalid store id.', status: 400 });
-    const [rows] = await db.query(`
-        SELECT store_id, sms_credits, is_enabled, auto_sms_enabled
-        FROM app_messaging_settings WHERE store_id = ?
-    `, [storeId]);
+    const [rows] = await db.query(`SELECT * FROM app_messaging_settings WHERE store_id = ?`, [storeId]);
     if (rows.length === 0) return res.status(404).send({ message: 'Store not found.', status: 404 });
 
-    const names = await enrichNames([storeId]);
-    const store = serializeStore(rows[0], names);
+    const [names, defaultPrice] = await Promise.all([enrichNames([storeId]), pricing.getDefaultUnitPrice()]);
+    const store = serializeStore(rows[0], names, defaultPrice);
     const [smsRows] = await db.query(`SELECT COUNT(*) as c FROM app_messaging_logs WHERE store_id = ? AND status = 'sent'`, [storeId]);
     store.sms_sent_total = Number(smsRows[0]?.c) || 0;
-    return res.send({ status: 200, store });
+    return res.send({ status: 200, store, default_unit_price: Number(defaultPrice) });
+}));
+
+// PATCH /api/admin/stores/:storeId/sms-price { unit_price } — the store's own
+// price per SMS for custom purchases; null/"" resets it to the default.
+Router.patch('/:storeId/sms-price', requireRole('super_admin'), asyncMiddleware(async (req, res) => {
+    const storeId = Number(req.params.storeId);
+    if (!storeId) return res.status(400).send({ message: 'Invalid store id.', status: 400 });
+    try {
+        const { previous, value } = await pricing.setStoreUnitPrice(storeId, req.body?.unit_price);
+        console.log(`[SMS Admin] price change: store ${storeId} ${previous ?? 'default'} → ${value ?? 'default'} by admin ${req.admin.admin_id}`);
+        const effective = await pricing.getStoreUnitPrice(storeId);
+        return res.send({
+            status: 200,
+            store_id: storeId,
+            sms_unit_price: value === null ? null : Number(value),
+            effective_unit_price: Number(effective.unit_price),
+        });
+    } catch (e) {
+        if (e.code === 'invalid_price' || e.code === 'store_not_installed') {
+            return res.status(e.status).send({ message: e.message, status: e.status, code: e.code });
+        }
+        throw e;
+    }
 }));
 
 Router.patch('/:storeId/credits', requireRole('super_admin'), asyncMiddleware(async (req, res) => {

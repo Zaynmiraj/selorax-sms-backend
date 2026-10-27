@@ -4,20 +4,26 @@ const auth = require('../middlewares/auth');
 const asyncMiddleware = require('../middlewares/asyncMiddleware');
 const wallet = require('../models/messaging-wallet');
 const payment = require('../models/messaging-payment');
+const pricing = require('../models/sms-pricing');
 
 /**
  * GET /api/messaging/wallet
  * Get SMS credits + package info
  */
 Router.get('/', auth, asyncMiddleware(async (req, res) => {
-    const credits = await wallet.getCredits(req.user.store_id);
-    const packages = await payment.getPackages();
+    const [credits, packages, price] = await Promise.all([
+        wallet.getCredits(req.user.store_id),
+        payment.getPackages(),
+        pricing.getStoreUnitPrice(req.user.store_id),
+    ]);
 
     res.send({
         message: 'Wallet fetched.',
         data: {
             sms_credits: credits,
             packages,
+            // Price per SMS for a custom purchase, for THIS store.
+            custom_unit_price: Number(price.unit_price),
         },
         status: 200,
     });

@@ -7,7 +7,7 @@
  */
 const platformBilling = require('../services/platform-billing');
 const { connection } = require('../startup/db');
-const CUSTOM_SMS_UNIT_PRICE = 0.70;
+const pricing = require('./sms-pricing');
 const MAX_CUSTOM_SMS_COUNT = 100000;
 const DASHBOARD_URL = process.env.DASHBOARD_URL || 'https://admin.selorax.io';
 const APP_EMBED_SLUG = process.env.SELORAX_APP_SLUG || 'selorax-messaging';
@@ -65,7 +65,9 @@ async function initiatePurchase(store_id, package_id) {
 }
 
 /**
- * Initiate a custom SMS purchase at a flat per-SMS rate.
+ * Initiate a custom SMS purchase at the store's price per SMS (its own price
+ * if an admin set one, else the admin-set default — models/sms-pricing.js).
+ * The price is snapshotted on the purchase row.
  */
 async function initiateCustomPurchase(store_id, sms_count) {
     const normalizedCount = Number(sms_count);
@@ -78,7 +80,8 @@ async function initiateCustomPurchase(store_id, sms_count) {
         throw Object.assign(new Error(`sms_count cannot exceed ${MAX_CUSTOM_SMS_COUNT}`), { status: 400 });
     }
 
-    const totalPrice = Number((normalizedCount * CUSTOM_SMS_UNIT_PRICE).toFixed(2));
+    const unitPrice = Number((await pricing.getStoreUnitPrice(store_id)).unit_price);
+    const totalPrice = Number((normalizedCount * unitPrice).toFixed(2));
     const customLabel = `Custom SMS Purchase (${normalizedCount} SMS)`;
 
     const charge = await platformBilling.createWalletTopupCharge(store_id, totalPrice, {
@@ -90,7 +93,7 @@ async function initiateCustomPurchase(store_id, sms_count) {
         INSERT INTO app_messaging_purchases
             (store_id, package_id, purchase_type, custom_label, unit_price, charge_id, sms_count, amount, status)
         VALUES (?, NULL, 'custom', ?, ?, ?, ?, ?, 'pending')
-    `, [store_id, customLabel, CUSTOM_SMS_UNIT_PRICE, charge.charge_id, normalizedCount, totalPrice]);
+    `, [store_id, customLabel, unitPrice, charge.charge_id, normalizedCount, totalPrice]);
 
     return {
         charge_id: charge.charge_id,
@@ -99,7 +102,7 @@ async function initiateCustomPurchase(store_id, sms_count) {
         status: charge.status,
         custom_purchase: {
             sms_count: normalizedCount,
-            unit_price: CUSTOM_SMS_UNIT_PRICE,
+            unit_price: unitPrice,
             total_price: totalPrice,
             label: customLabel,
         },
@@ -219,6 +222,5 @@ module.exports = {
     getChargeStatusByTranId,
     creditPurchase,
     getPurchaseHistory,
-    CUSTOM_SMS_UNIT_PRICE,
     MAX_CUSTOM_SMS_COUNT,
 };

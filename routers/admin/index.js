@@ -16,6 +16,7 @@ Router.use('/auth', require('./auth'));
 Router.use(smsAdminAuth);
 Router.use('/dashboard', require('./dashboard'));
 Router.use('/stores', require('./stores'));
+Router.use('/pricing', require('./pricing'));
 Router.use('/logs', require('./logs'));
 Router.use('/admins', require('./admins')); // super_admin only (enforced inside)
 

@@ -14,7 +14,7 @@ SeloraX Messaging is an SMS notification microservice for the SeloraX e-commerce
   fully offline (`fetch` mocked); the others load the DB module, so dependencies must be installed.
 - No build step, no linter.
 
-Migrations in `migrations/` (currently `003`–`012`) must be applied manually, in order, against the shared platform MySQL database.
+Migrations in `migrations/` (currently `003`–`013`) must be applied manually, in order, against the shared platform MySQL database.
 
 ## Architecture
 
@@ -44,7 +44,7 @@ All outbound platform calls send `X-Client-Id` + `X-Client-Secret` + `X-Store-Id
 SMS credits are **owned by this app**, stored in `app_messaging_settings.sms_credits`. The platform wallet is only used for payment processing:
 1. `routers/payment.js` → `models/messaging-payment.js` creates a top-up charge via platform billing and writes a `pending` row in `app_messaging_purchases`.
 2. When `/payment/verify/:charge_id` is called (or auto-renewal hits) and the charge reports `active`/`completed`, `creditPurchase()` performs an atomic `UPDATE ... status='pending' → 'credited'` guard, then increments `sms_credits`.
-3. Two purchase paths: fixed packages (`app_messaging_packages`) and **custom** purchases at `CUSTOM_SMS_UNIT_PRICE = 0.70` (max 100k). Custom rows set `purchase_type='custom'` and store `custom_label` + `unit_price`.
+3. Two purchase paths: fixed packages (`app_messaging_packages`, same price for every store) and **custom** purchases (max 100k) at the store's **price per SMS** (`models/sms-pricing.js`): the store's own `app_messaging_settings.sms_unit_price` if an admin set one, else the admin-set default `app_messaging_config.default_sms_unit_price`, else `0.70`. Both are set by a **super_admin** in the admin panel (`PUT /api/admin/pricing`, `PATCH /api/admin/stores/:id/sms-price`); input is plain-decimal only, 0 < price ≤ 100, ≤ 4 decimals. Custom rows set `purchase_type='custom'` and snapshot `custom_label` + `unit_price`. `GET /wallet` and `GET /payment/packages` return the store's `custom_unit_price`; the dashboard widget values credits at it. Needs migration `013` (code tolerates it missing: everyone on 0.70).
 
 SMS sending deducts credits through `models/messaging-wallet.js` (`deductCredit`) with a guarded `UPDATE ... WHERE sms_credits >= ?` so concurrent sends cannot go negative.
 

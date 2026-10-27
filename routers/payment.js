@@ -3,14 +3,20 @@ const Router = express.Router();
 const auth = require('../middlewares/auth');
 const asyncMiddleware = require('../middlewares/asyncMiddleware');
 const payment = require('../models/messaging-payment');
+const pricing = require('../models/sms-pricing');
 
 /**
  * GET /api/messaging/packages
  * List available SMS packages
  */
 Router.get('/packages', auth, asyncMiddleware(async (req, res) => {
-    const packages = await payment.getPackages();
-    res.send({ message: 'Packages fetched.', data: packages, status: 200 });
+    const [packages, price] = await Promise.all([
+        payment.getPackages(),
+        pricing.getStoreUnitPrice(req.user.store_id),
+    ]);
+    // `data` stays the package array for existing callers; the store's custom
+    // price per SMS rides alongside.
+    res.send({ message: 'Packages fetched.', data: packages, custom_unit_price: Number(price.unit_price), status: 200 });
 }));
 
 /**

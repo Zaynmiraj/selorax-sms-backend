@@ -5,9 +5,7 @@ const asyncMiddleware = require('../middlewares/asyncMiddleware');
 const { connection } = require('../startup/db');
 const messaging = require('../models/messaging');
 const wallet = require('../models/messaging-wallet');
-
-// BDT value of one SMS credit. Mirrors CUSTOM_SMS_UNIT_PRICE in models/messaging-payment.js.
-const SMS_UNIT_PRICE = 0.70;
+const pricing = require('../models/sms-pricing');
 
 /**
  * Dashboard extension endpoints, called by the SeloraX platform's extension proxy
@@ -29,16 +27,18 @@ const SMS_UNIT_PRICE = 0.70;
 Router.post('/widget-data', auth, asyncMiddleware(async (req, res) => {
     const store_id = req.user.store_id;
 
-    const [credits, stats, settings] = await Promise.all([
+    const [credits, stats, settings, price] = await Promise.all([
         wallet.getCredits(store_id),
         messaging.getStats(store_id),
         messaging.getSettings(store_id),
+        pricing.getStoreUnitPrice(store_id),
     ]);
 
     res.send({
         update_state: {
             loaded: true,
-            balance: (credits * SMS_UNIT_PRICE).toFixed(2),
+            // BDT value of the remaining credits at this store's price per SMS.
+            balance: (credits * Number(price.unit_price)).toFixed(2),
             sms_remaining: credits,
             this_month: Number(stats.this_month) || 0,
             total_sent: Number(stats.total_sent) || 0,
