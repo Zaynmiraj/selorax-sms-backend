@@ -312,6 +312,8 @@ async function sendSms(store_id, installation_id, phone, message, { event_topic,
     return {
         success: result.success,
         ...(result.success ? {} : { error: result.provider_response?.error || 'send_failed' }),
+        // The SMS may have been sent anyway: callers must NOT auto-retry it.
+        ...(result.provider_response?.indeterminate ? { indeterminate: true } : {}),
         log_id: sms_log_id,
         sms_credits: remainingCredits,
         provider_response: enrichedProviderResponse,

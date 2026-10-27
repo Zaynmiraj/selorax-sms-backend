@@ -93,8 +93,14 @@ checks credits, sends, logs, and deducts only on success, exactly as before.
   charged to us). Failures carry an `error` code (`no_sender_id`, `platform_insufficient_funds`,
   `sending_unavailable`, `invalid_receiver`, `suppressed`, `rate_limited`, `auth_failed`,
   `network_error`, …) which `models/messaging.js` `sendSms()` now returns to callers.
-- One retry on timeout / network error / 5xx / 409 with the **same `Idempotency-Key`** — the
-  platform replays or never recorded it, so a retry cannot double-send.
+- Up to 3 attempts on timeout / network error / 5xx / 409 with the **same `Idempotency-Key`** —
+  the platform replays or never recorded it, so these retries cannot double-send. Timeout is 60 s,
+  deliberately ABOVE the platform's 30 s gateway timeout.
+- **`indeterminate`** (still timing out, still 409/502-504, or a 200 we could not read): the SMS
+  may have gone out. It is logged `failed`, not billed, and `sendSms()` returns
+  `indeterminate: true` — the scheduler does **not** retry it (a retry has a new key and could send
+  twice), nor `PERMANENT_ERRORS` (`no_sender_id`, `invalid_receiver`, …). Campaign recipients store
+  the real error code.
 - Campaign sends (`event_topic: 'campaign'`) go as `promotional: true`.
 - Install/uninstall (`routers/oauth.js`) best-effort `PUT /api/v1/stores/{store_id}` with the
   store's name/domain and `active` so it shows up in the platform admin.

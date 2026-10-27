@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const { connection } = require('../startup/db');
 const messaging = require('../models/messaging');
 const payment = require('../models/messaging-payment');
+const { PERMANENT_ERRORS } = require('./sms-providers/platform');
 
 let pollInterval = null;
 let renewalInterval = null;
@@ -142,7 +143,10 @@ async function processDueJobs() {
                     WHERE job_id = ?
                 `, [result.log_id, job.job_id]);
             } else {
-                await handleJobFailure(job, result.error || 'SMS send failed');
+                // Don't retry what may already have gone out (indeterminate) or
+                // what cannot succeed (bad number, no sender ID, …).
+                const final = result.indeterminate || PERMANENT_ERRORS.has(result.error);
+                await handleJobFailure(job, result.error || 'SMS send failed', { final });
             }
         } catch (err) {
             await handleJobFailure(job, err.message);
@@ -153,10 +157,10 @@ async function processDueJobs() {
 /**
  * Handle a failed job — retry with exponential backoff or mark as failed
  */
-async function handleJobFailure(job, errorMsg) {
+async function handleJobFailure(job, errorMsg, { final = false } = {}) {
     const newAttempts = (job.attempts || 0) + 1;
 
-    if (newAttempts >= (job.max_attempts || 3)) {
+    if (final || newAttempts >= (job.max_attempts || 3)) {
         // Max retries reached — mark as failed
         await connection.promise().query(/*sql*/`
             UPDATE app_messaging_scheduled

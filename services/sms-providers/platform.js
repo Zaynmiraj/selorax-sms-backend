@@ -17,7 +17,10 @@ const crypto = require('crypto');
  * sendSms() never throws and returns { success, sms_type, provider_response }.
  */
 
-const TIMEOUT_MS = 15000;
+// Must stay ABOVE the platform's own gateway timeout (30 s): giving up first
+// would record a failure for an SMS the platform then sends and bills.
+const TIMEOUT_MS = 60000;
+const MAX_ATTEMPTS = 3;
 const GSM7_REGEX = /^[@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞ ÆæßÉ !"#¤%&'()*+,\-./0-9:;<=>?¡A-ZÄÖÑÜa-zäöñüà^{}\\[\]~|€]*$/;
 
 // Platform error `type` → our own code. Anything unlisted becomes `send_rejected`.
@@ -68,12 +71,27 @@ async function request(method, path, body, { idempotencyKey } = {}) {
     return { status: response.status, data };
 }
 
-// Worth ONE retry with the same Idempotency-Key: the platform either never
-// recorded the request (5xx before dispatch releases the key) or replays the
-// stored result — so a retry can never double-send.
+// Worth retrying with the SAME Idempotency-Key: the platform either never
+// recorded the request (5xx before dispatch releases the key), is still on it
+// (409), or replays the stored result — so a retry can never double-send.
 function isRetryable(status) {
     return status === 409 || status >= 500;
 }
+
+// Still unresolved after the last attempt = the SMS may or may not have gone
+// out: 409 (platform still processing it) or a proxy-level 502/503/504.
+function isIndeterminate(status) {
+    return status === 409 || status === 502 || status === 503 || status === 504;
+}
+
+/**
+ * Errors that will fail again on retry (configuration or the number itself).
+ * The scheduler does not retry these.
+ */
+const PERMANENT_ERRORS = new Set([
+    'no_sender_id', 'invalid_receiver', 'suppressed', 'auth_failed', 'not_configured',
+    'sending_unavailable', 'pricing_unavailable', 'send_rejected',
+]);
 
 function fail(error, extra = {}) {
     return {
@@ -103,7 +121,7 @@ async function sendSms(phone, message, { event_topic, store_id } = {}) {
 
     let res = null;
     let lastError = null;
-    for (let attempt = 1; attempt <= 2; attempt++) {
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
         try {
             res = await request('POST', '/api/v1/messages', body, { idempotencyKey });
             lastError = null;
@@ -112,12 +130,15 @@ async function sendSms(phone, message, { event_topic, store_id } = {}) {
             res = null;
             lastError = err;
         }
-        if (attempt === 1) await new Promise((r) => setTimeout(r, res?.status === 409 ? 2000 : 500));
+        if (attempt < MAX_ATTEMPTS) {
+            await new Promise((r) => setTimeout(r, res?.status === 409 ? 3000 : 500 * attempt));
+        }
     }
 
     if (!res) {
-        // Timeout / network error twice: the platform MAY have sent it. Not
-        // billed here (same as before), flagged so a human can check.
+        // Timeout / network error on every attempt: the platform MAY have sent
+        // it. Not billed here, flagged `indeterminate` so nothing auto-retries
+        // it (a retry uses a new key and could send it twice).
         return fail('network_error', {
             indeterminate: true,
             reason: redactKey(lastError?.name === 'TimeoutError' ? 'timeout' : lastError?.message),
@@ -126,6 +147,18 @@ async function sendSms(phone, message, { event_topic, store_id } = {}) {
     }
 
     const { status, data } = res;
+    if (status !== 200 && isIndeterminate(status)) {
+        return fail('platform_pending', {
+            indeterminate: true,
+            http_status: status,
+            reason: redactKey(data?.error?.message || ''),
+            idempotency_key: idempotencyKey,
+        });
+    }
+    if (status === 200 && !data) {
+        // Accepted, but the body could not be read: it was most likely sent.
+        return fail('unreadable_response', { indeterminate: true, http_status: status, idempotency_key: idempotencyKey });
+    }
     if (status !== 200) {
         const type = data?.error?.type;
         return fail(ERROR_CODES[type] || (status >= 500 ? 'platform_error' : 'send_rejected'), {
@@ -174,4 +207,4 @@ async function registerStore(store_id, { name, domain, active } = {}) {
     }
 }
 
-module.exports = { sendSms, registerStore, isConfigured, ERROR_CODES };
+module.exports = { sendSms, registerStore, isConfigured, ERROR_CODES, PERMANENT_ERRORS };

@@ -102,7 +102,7 @@ async function processSingleCampaign(campaign) {
             await campaigns.updateRecipientStatus(
                 recipient.recipient_id,
                 result.success ? 'sent' : 'failed',
-                result.success ? null : 'SMS send failed'
+                result.success ? null : (result.error || 'SMS send failed')
             );
         } catch (err) {
             await campaigns.updateRecipientStatus(recipient.recipient_id, 'failed', err.message);

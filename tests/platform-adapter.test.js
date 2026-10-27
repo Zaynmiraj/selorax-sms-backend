@@ -81,7 +81,7 @@ test('maps platform error types to our codes, without retrying a 4xx', async () 
     assert.equal(calls.length, 1);
 });
 
-test('retries a timeout ONCE with the same Idempotency-Key', async () => {
+test('retries a timeout with the same Idempotency-Key', async () => {
     const timeout = Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' });
     mockFetch(timeout, { status: 200, body: sentBody });
     const res = await platform.sendSms('01760505055', 'x', { store_id: 1 });
@@ -90,17 +90,42 @@ test('retries a timeout ONCE with the same Idempotency-Key', async () => {
     assert.equal(calls[0].init.headers['Idempotency-Key'], calls[1].init.headers['Idempotency-Key']);
 });
 
-test('two network failures → indeterminate failure, never throws', async () => {
-    mockFetch(new Error('ECONNRESET'), new Error('ECONNRESET'));
+test('network failures on every attempt → indeterminate failure, never throws', async () => {
+    mockFetch(new Error('ECONNRESET'), new Error('ECONNRESET'), new Error('ECONNRESET'));
     const res = await platform.sendSms('01760505055', 'x', { store_id: 1 });
     assert.equal(res.success, false);
     assert.equal(res.provider_response.error, 'network_error');
     assert.equal(res.provider_response.indeterminate, true);
+    assert.equal(calls.length, 3);
+});
+
+test('still in progress (409) after every attempt → indeterminate, not a plain failure', async () => {
+    const busy = { status: 409, body: { error: { type: 'request_in_progress', message: 'busy' } } };
+    mockFetch(busy, busy, busy);
+    const res = await platform.sendSms('01760505055', 'x', { store_id: 1 });
+    assert.equal(res.success, false);
+    assert.equal(res.provider_response.indeterminate, true);
+    assert.equal(res.provider_response.error, 'platform_pending');
+});
+
+test('a 200 with an unreadable body is indeterminate (it was most likely sent)', async () => {
+    mockFetch({ status: 200, body: null });
+    const res = await platform.sendSms('01760505055', 'x', { store_id: 1 });
+    assert.equal(res.success, false);
+    assert.equal(res.provider_response.indeterminate, true);
+});
+
+test('a plain 500 is a definite failure after the retries', async () => {
+    const err = { status: 500, body: { error: { type: 'internal_error', message: 'boom' } } };
+    mockFetch(err, err, err);
+    const res = await platform.sendSms('01760505055', 'x', { store_id: 1 });
+    assert.equal(res.provider_response.error, 'platform_error');
+    assert.equal(res.provider_response.indeterminate, undefined);
 });
 
 test('never puts the API key into provider_response', async () => {
-    mockFetch({ status: 500, body: { error: { type: 'internal_error', message: 'bad key sx_secret_key_123' } } },
-        { status: 500, body: { error: { type: 'internal_error', message: 'bad key sx_secret_key_123' } } });
+    const leak = { status: 500, body: { error: { type: 'internal_error', message: 'bad key sx_secret_key_123' } } };
+    mockFetch(leak, leak, leak);
     const res = await platform.sendSms('01760505055', 'x', { store_id: 1 });
     assert.equal(res.success, false);
     assert.ok(!JSON.stringify(res).includes('sx_secret_key_123'));

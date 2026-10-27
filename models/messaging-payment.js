@@ -81,7 +81,12 @@ async function initiateCustomPurchase(store_id, sms_count) {
     }
 
     const unitPrice = Number((await pricing.getStoreUnitPrice(store_id)).unit_price);
-    const totalPrice = Number((normalizedCount * unitPrice).toFixed(2));
+    // Exact in integer ten-thousandths (prices have ≤ 4 decimals), rounded once
+    // to whole poisha — float `count * price` can drift a poisha.
+    const totalPrice = Math.round((normalizedCount * Math.round(unitPrice * 10000)) / 100) / 100;
+    if (!(totalPrice >= 0.01)) {
+        throw Object.assign(new Error('The total is below ৳0.01 — buy more SMS.'), { status: 400 });
+    }
     const customLabel = `Custom SMS Purchase (${normalizedCount} SMS)`;
 
     const charge = await platformBilling.createWalletTopupCharge(store_id, totalPrice, {
